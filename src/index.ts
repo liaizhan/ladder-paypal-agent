@@ -11,6 +11,7 @@ import {
   getOrderStatuses,
   INVOICE_ID,
   invoiceEventId,
+  publicError,
   refundCapture,
   sendInvoice,
   verifyWebhook,
@@ -593,7 +594,8 @@ export default {
       }
     } catch (err) {
       console.log(JSON.stringify({ event: 'error', path: pathname, message: String(err) }));
-      return json({ error: 'Something went wrong. Please try again.' }, 500);
+      const failure = publicError(err);
+      return json(failure.body, failure.status);
     }
 
     return json({ error: 'not found' }, 404);

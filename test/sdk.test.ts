@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PLANS } from '../src/catalog.ts';
-import { captureOrder, createOrderWithLink, getCapture, getOrderStatuses, refundCapture, useTestTransport } from '../src/paypal.ts';
+import { captureOrder, createOrderWithLink, getCapture, getOrderStatuses, PayPalError, publicError, refundCapture, useTestTransport } from '../src/paypal.ts';
 
 const ENV = { PAYPAL_ENV: 'sandbox', PAYPAL_CLIENT_ID: 'test-id', PAYPAL_CLIENT_SECRET: 'test-secret' };
 type Sent = { method: string; url: string; headers: Record<string, string>; body: any };
@@ -83,4 +83,49 @@ test('SDK getCapture and refundCapture: real capture data, one refund per captur
   assert.equal(r.headers['paypal-request-id'], 'ladder-refund-CAP123456789');
   assert.equal(r.headers.prefer, 'return=minimal');
   assert.deepEqual(r.body, { note_to_payer: 'Ladder 14-day refund guarantee' });
+});
+
+test('SDK captureOrder sends a fixed PayPal-Request-Id per order, so a repeat cannot capture twice', async () => {
+  const sent = fake(() => [201, { id: 'ORDER12345678', status: 'COMPLETED', purchase_units: [{ reference_id: 'ladder_1m', payments: { captures: [{ id: 'CAP123456789', amount: { currency_code: 'USD', value: '39.00' } }] } }] }]);
+  await captureOrder(ENV, 'ORDER12345678');
+  await captureOrder(ENV, 'ORDER12345678');
+  const caps = api(sent);
+  assert.equal(caps.length, 2);
+  assert.equal(caps[0].headers['paypal-request-id'], 'ladder-capture-ORDER12345678');
+  assert.equal(caps[1].headers['paypal-request-id'], 'ladder-capture-ORDER12345678');
+});
+
+test('SDK retries a POST after a PayPal 503 with the same PayPal-Request-Id', async () => {
+  let n = 0;
+  const sent = fake(() => (n++ === 0 ? [503, { name: 'SERVICE_UNAVAILABLE' }] : [200, { id: 'ORDER12345678', status: 'CREATED', links: [] }]));
+  const out = await createOrderWithLink(ENV, PLANS.ladder_1m, null);
+  assert.equal(out.id, 'ORDER12345678');
+  const tries = api(sent);
+  assert.equal(tries.length, 2);
+  assert.equal(tries[0].headers['paypal-request-id'], tries[1].headers['paypal-request-id']);
+});
+
+test('SDK does not retry a 4xx: the caller gets PayPal\'s reason once', async () => {
+  const sent = fake(() => [422, { name: 'UNPROCESSABLE_ENTITY', details: [{ issue: 'ORDER_NOT_APPROVED' }] }]);
+  await assert.rejects(captureOrder(ENV, 'ORDER12345678'), (e: unknown) => e instanceof PayPalError && e.status === 422 && e.issue === 'ORDER_NOT_APPROVED');
+  assert.equal(api(sent).length, 1);
+});
+
+test('publicError keeps failures distinct and never shows the SDK message', () => {
+  assert.deepEqual(publicError(new PayPalError('capture', 422, 'ORDER_NOT_APPROVED')), {
+    status: 409,
+    body: { error: 'The buyer has not approved this order in PayPal yet.', issue: 'ORDER_NOT_APPROVED' },
+  });
+  assert.equal(publicError(new PayPalError('capture', 422, 'ORDER_ALREADY_CAPTURED')).body.error, 'This order is already paid.');
+  assert.equal(publicError(new PayPalError('capture get', 404, '')).status, 404);
+  for (const s of [0, 401, 403, 429, 500, 503]) assert.equal(publicError(new PayPalError('create', s, 'X')).status, 502);
+  const other = publicError(new Error('axios: secret internal detail'));
+  assert.equal(other.status, 500);
+  assert.doesNotMatch(JSON.stringify(other.body), /axios|secret/);
+});
+
+test('A PayPal answer that does not match the schema is a failure, never "no capture"', async () => {
+  fake(() => [200, { id: 'CAP123456789', amount: { value: '39.00' } }]);
+  await assert.rejects(getCapture(ENV, 'CAP123456789'), (e: unknown) => e instanceof PayPalError && e.status === 0);
+  assert.equal(publicError(new PayPalError('capture get', 0, '')).status, 502);
 });
