@@ -195,7 +195,7 @@ function updateFromGrid() {
   const hooks = rows.reduce((s, r) => s + (r.webhooks || 0), 0);
   ordersGrid.setGridOption('pinnedBottomRowData', [{
     createdAt: '', status: rows.length + ' orders', followedAdvice: advised.length ? Math.round(100 * followed / advised.length) + '% followed' : '',
-    amount: revenue, orderId: paid.length + ' paid', captureId: '', steps: '', lang: '', recommended: '', chosen: '',
+    amount: revenue, orderId: paid.length + ' paid', captureId: '', steps: null, lang: '', recommended: '', chosen: '',
     createdBy: byAgent + ' by AI agent', webhooks: hooks ? hooks + ' events' : '', refundId: refunded.length ? refunded.length + ' refunded' : '',
   }]);
   const conv = allDays.reduce((s, d) => s + d.conversations, 0);

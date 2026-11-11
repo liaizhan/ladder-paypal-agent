@@ -132,7 +132,7 @@ async function send(text) {
     if (turn.stage === 'help') { $('form').classList.add('hidden'); return; }
     if (turn.stage === 'recommend') {
       state.agentOrder = turn.agentOrder || null;
-      if (state.agentOrder) addMsg('assistant', 'Agent tool call: ' + state.agentOrder.tool + '\nPayPal order ' + state.agentOrder.id + ' is ready and waiting for your approval. Nothing is charged until you approve it in PayPal.', 'tool');
+      if (state.agentOrder) addMsg('assistant', 'Agent tool call: ' + state.agentOrder.tool + '\\nPayPal order ' + state.agentOrder.id + ' is ready and waiting for your approval. Nothing is charged until you approve it in PayPal.', 'tool');
       showRecommendation(turn);
     }
   } catch (e) {
