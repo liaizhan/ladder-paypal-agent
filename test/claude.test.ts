@@ -100,3 +100,11 @@ test('an empty Claude answer also falls back', async () => {
   const ai = makeClaudeBinding({ claudeModel: 'm', fallback, client: { messages: { create: async () => ({ content: [] }) } } });
   assert.deepEqual(await ai.run('@cf/llama', { messages: [{ role: 'user', content: 'x' }] }), { response: 'llama' });
 });
+
+test('tools in the OpenAI shape { type, function } are flattened for Claude', () => {
+  const req = toClaudeRequest('m', {
+    messages: [{ role: 'user', content: 'q' }],
+    tools: [{ type: 'function', function: { name: 'skip_order', description: 'Skip', parameters: { type: 'object', properties: { reason: { type: 'string' } } } } }],
+  });
+  assert.deepEqual(req.tools, [{ name: 'skip_order', description: 'Skip', input_schema: { type: 'object', properties: { reason: { type: 'string' } } } }]);
+});

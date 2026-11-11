@@ -13,6 +13,9 @@ import type { AiBinding } from './agent.ts';
 type Msg = { role: string; content: unknown };
 type ClaudeMsg = { role: 'user' | 'assistant'; content: string };
 type FlatTool = { name: string; description?: string; parameters?: unknown };
+/** Agents pass tools either flat or in the OpenAI shape { type: 'function', function: {...} }. */
+type AnyTool = FlatTool | { type?: string; function?: FlatTool };
+const flat = (t: AnyTool): FlatTool => ((t as { function?: FlatTool }).function ?? (t as FlatTool));
 
 export interface ClaudeRequest {
   model: string;
@@ -67,7 +70,7 @@ export function toClaudeRequest(model: string, input: Record<string, unknown>): 
     output_config: { effort: 'low' },
   };
   if (system.length) req.system = system.join('\n\n');
-  const tools = Array.isArray(input.tools) ? (input.tools as FlatTool[]) : [];
+  const tools = (Array.isArray(input.tools) ? (input.tools as AnyTool[]) : []).map(flat).filter((t) => typeof t?.name === 'string');
   if (tools.length) {
     req.tools = tools.map((t) => ({
       name: t.name,
