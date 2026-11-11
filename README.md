@@ -241,7 +241,7 @@ npm test
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing the Bryntum Gantt plan tied to PayPal payments and the AG Grid payments dashboard with plain-words questions were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing, the Bryntum Gantt plan tied to PayPal payments and the AG Grid payments dashboard with plain-words questions were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 
