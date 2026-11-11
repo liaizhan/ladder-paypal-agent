@@ -167,14 +167,27 @@ export default {
           .slice(0, 10);
         let reconciled = 0;
         if (stale.length) {
-          const statuses = await getOrderStatuses(env, stale.map((o) => o.orderId)).catch(() => ({}) as Record<string, string>);
-          for (const o of stale) {
-            const st = statuses[o.orderId];
-            if (!st) continue;
-            reconciled++;
-            o.status = st;
-            o.updatedAt = new Date().toISOString();
-            background(ctx, saveOrder(kv, o));
+          const work = getOrderStatuses(env, stale.map((o) => o.orderId))
+            .catch(() => ({}) as Record<string, string>)
+            .then(async (statuses) => {
+              for (const o of stale) {
+                const st = statuses[o.orderId];
+                if (!st) continue;
+                await saveOrder(kv, { ...o, status: st, updatedAt: new Date().toISOString() });
+              }
+              return statuses;
+            });
+          background(ctx, work);
+          // The page waits at most 4 seconds for PayPal; a slower answer is saved for the next load.
+          const statuses = await Promise.race([work, new Promise<null>((r) => setTimeout(() => r(null), 4000))]);
+          if (statuses) {
+            for (const o of stale) {
+              const st = statuses[o.orderId];
+              if (!st) continue;
+              reconciled++;
+              o.status = st;
+              o.updatedAt = new Date().toISOString();
+            }
           }
         }
         return json({ orders: orders.map(publicOrder), days, reconciled, generatedAt: new Date().toISOString() });
