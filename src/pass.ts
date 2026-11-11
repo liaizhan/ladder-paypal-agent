@@ -6,6 +6,7 @@ export interface AccessPass {
   plan: string;
   captureId: string;
   expires: string; // ISO date
+  orderId?: string; // PayPal order, so a refund finds its ledger row
 }
 
 const enc = new TextEncoder();
@@ -58,7 +59,8 @@ export async function signPass(secret: string, pass: AccessPass): Promise<string
 export async function verifyPass(secret: string, token: string, now = new Date()): Promise<AccessPass | null> {
   const data = await verifyData(secret, token);
   if (!data || data.kind !== 'pass') return null;
-  const pass = { plan: String(data.plan), captureId: String(data.captureId), expires: String(data.expires) };
+  const pass: AccessPass = { plan: String(data.plan), captureId: String(data.captureId), expires: String(data.expires) };
+  if (typeof data.orderId === 'string') pass.orderId = data.orderId;
   return new Date(pass.expires) > now ? pass : null;
 }
 

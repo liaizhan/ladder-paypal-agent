@@ -28,6 +28,8 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
   .msg.user { margin-left:auto; background:var(--blue); color:#fff; }
   .msg.assistant { background:#fff; border:1px solid var(--line); }
   .msg.help { background:#fff1f0; border:1px solid #f3b8b3; }
+  .msg.tool { background:transparent; border:1px dashed var(--line); color:var(--muted); font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .ghost { background:#fff; color:var(--blue); border:1px solid var(--line); padding:12px 16px; font-size:15px; margin-top:12px; }
   form { display:flex; gap:8px; margin-top:12px; }
   textarea { flex:1; resize:vertical; min-height:52px; border:1px solid var(--line); border-radius:12px; padding:12px; font:inherit; }
   button { border:0; border-radius:12px; background:var(--blue); color:#fff; font:600 16px/1 inherit; padding:0 18px; cursor:pointer; }
@@ -83,7 +85,7 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <div class="plans" id="plans"></div>
     <div id="paypal-buttons"></div>
     <p id="pay-status" class="sub" aria-live="polite"></p>
-    <p class="fine">One payment, no auto-renewal. 14-day refund guarantee on the live site. Prices are sandbox demo equivalents in USD; on 108psy.com the plans cost 19,900 KZT and 39,800 KZT.</p>
+    <p class="fine">One payment, no auto-renewal. 14-day refund guarantee, one click after payment. Prices are sandbox demo equivalents in USD; on 108psy.com the plans cost 19,900 KZT and 39,800 KZT.</p>
   </section>
 
   <section class="card hidden" id="done">
@@ -91,13 +93,15 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <p id="done-text"></p>
     <div class="reason" id="first-step"></div>
     <p class="fine" id="pass-check"></p>
+    <button type="button" class="ghost" id="refund-btn">Request a refund (14-day guarantee)</button>
+    <p class="fine" id="refund-status" aria-live="polite"></p>
   </section>
 
   <footer>Ladder method by Aizhan Li, author of the Ladder method. Live product: <a href="https://108psy.com">108psy.com</a>. The advisor is not a doctor or a therapist and does not diagnose. <a href="/dashboard">Payments dashboard</a></footer>
 </div>
 <script>
 const CONFIG = ${config};
-const state = { messages: [], ladder: null, plan: null, recommended: null, recToken: null, sdkLoaded: false };
+const state = { messages: [], ladder: null, plan: null, recommended: null, recToken: null, agentOrder: null, pass: null, sdkLoaded: false };
 const $ = (id) => document.getElementById(id);
 
 function addMsg(role, text, cls) {
@@ -126,7 +130,11 @@ async function send(text) {
     addMsg('assistant', turn.reply, turn.stage === 'help' ? 'help' : 'assistant');
     state.messages.push({ role: 'assistant', content: turn.reply });
     if (turn.stage === 'help') { $('form').classList.add('hidden'); return; }
-    if (turn.stage === 'recommend') showRecommendation(turn);
+    if (turn.stage === 'recommend') {
+      state.agentOrder = turn.agentOrder || null;
+      if (state.agentOrder) addMsg('assistant', 'Agent tool call: ' + state.agentOrder.tool + '\nPayPal order ' + state.agentOrder.id + ' is ready and waiting for your approval. Nothing is charged until you approve it in PayPal.', 'tool');
+      showRecommendation(turn);
+    }
   } catch (e) {
     thinking.textContent = 'Something went wrong. Please try again.';
   } finally {
@@ -191,6 +199,11 @@ function renderButtons() {
   paypal.Buttons({
     style: { layout: 'vertical', shape: 'rect', label: 'pay' },
     createOrder: async () => {
+      // Reuse the order the checkout agent prepared, if the person kept that plan.
+      if (state.agentOrder && state.agentOrder.plan === state.plan && !state.agentOrder.used) {
+        state.agentOrder.used = true;
+        return state.agentOrder.id;
+      }
       const res = await fetch('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: state.plan, ladder: state.ladder, recToken: state.recToken }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'order failed');
@@ -209,12 +222,38 @@ function renderButtons() {
       $('first-step').textContent = r.firstStep ? 'Your first step today: ' + r.firstStep : '';
       $('done').classList.remove('hidden');
       $('done').scrollIntoView({ behavior: 'smooth' });
+      state.pass = r.pass;
+      try { localStorage.setItem('ladderPass', r.pass); } catch (e) {}
       const check = await fetch('/api/pass?token=' + encodeURIComponent(r.pass)).then((x) => x.json());
       $('pass-check').textContent = check.active ? 'Signed access pass verified by the server: ' + check.plan + ', expires ' + check.expires.slice(0, 10) + '.' : '';
     },
     onError: () => { $('pay-status').textContent = 'PayPal could not complete the payment. Please try again.'; },
   }).render('#paypal-buttons');
 }
+
+$('refund-btn').addEventListener('click', async () => {
+  if (!state.pass) return;
+  // Two clicks instead of a modal: the first one asks, the second one refunds.
+  if (!state.refundArmed) {
+    state.refundArmed = true;
+    $('refund-btn').textContent = 'Yes, refund the full amount and close my access';
+    return;
+  }
+  $('refund-btn').disabled = true;
+  $('refund-status').textContent = 'Asking PayPal for the refund...';
+  try {
+    const res = await fetch('/api/refund', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pass: state.pass }) });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'refund failed');
+    const check = await fetch('/api/pass?token=' + encodeURIComponent(state.pass)).then((x) => x.json());
+    $('refund-status').textContent = 'Refunded' + (r.amount ? ' $' + r.amount : '') + '. PayPal refund ' + r.refundId + '. Access pass is now ' + (check.active ? 'active' : 'closed') + '.';
+    $('pass-check').textContent = '';
+    try { localStorage.removeItem('ladderPass'); } catch (e) {}
+  } catch (e) {
+    $('refund-btn').disabled = false;
+    $('refund-status').textContent = e.message === 'refund window closed' ? 'The 14-day refund window has closed.' : 'The refund did not go through. Please try again.';
+  }
+});
 
 $('form').addEventListener('submit', (e) => { e.preventDefault(); send($('input').value); });
 $('input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send($('input').value); } });

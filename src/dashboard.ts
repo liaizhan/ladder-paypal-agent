@@ -50,7 +50,7 @@ export function renderDashboard(): string {
 <div class="wrap">
   <div class="banner">PayPal <b>sandbox</b>: no real money moves. Includes test runs by the author.</div>
   <h1>Payments dashboard</h1>
-  <p class="sub">Every PayPal order the Ladder AI advisor led to: what the AI recommended, what the person chose, and what PayPal says now. Open orders are reconciled with PayPal Orders v2 each time this page loads.</p>
+  <p class="sub">Every PayPal order the Ladder AI advisor led to: what the AI recommended, what the person chose, and what PayPal says now. Open orders are reconciled with PayPal Orders v2 each time this page loads, and verified PayPal webhooks update orders, captures and refunds as they happen.</p>
   <p class="note">Privacy: no goals, obstacles, names or emails are stored. Only plan ids, the number of steps, the language, PayPal ids and statuses. Ids of unpaid orders are masked. <a href="/">Back to the advisor</a></p>
 
   <div class="kpis" id="kpis"></div>
@@ -63,6 +63,7 @@ export function renderDashboard(): string {
       <button type="button" data-f="all" class="on">All</button>
       <button type="button" data-f="paid">Paid</button>
       <button type="button" data-f="open">Open</button>
+      <button type="button" data-f="refunded">Refunded</button>
       <button type="button" data-f="problem">Declined or expired</button>
     </div>
     <div class="right">
@@ -85,6 +86,7 @@ const PLAN = { ladder_1m: '1 month', ladder_3m: '3 months' };
 const LANG = { en: 'English', ru: 'Russian', kk: 'Kazakh', '': '' };
 const OPEN = ['CREATED', 'APPROVED', 'SAVED', 'PAYER_ACTION_REQUIRED'];
 const PROBLEM = ['INSTRUMENT_DECLINED', 'VOIDED', 'EXPIRED', 'FAILED', 'DECLINED'];
+const REFUND = ['REFUNDED', 'REVERSED'];
 const $ = (id) => document.getElementById(id);
 let statusFilter = 'all';
 let allDays = [];
@@ -98,8 +100,9 @@ function pill(text, cls) {
 }
 const money = (n) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const when = (iso) => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-const statusClass = (s) => s === 'COMPLETED' ? 'ok' : PROBLEM.includes(s) ? 'bad' : s === 'APPROVED' ? 'warn' : 'open';
-const statusText = (s) => ({ COMPLETED: 'Paid', CREATED: 'Checkout opened', APPROVED: 'Approved, not captured', PAYER_ACTION_REQUIRED: 'Waiting for the buyer', SAVED: 'Saved, not captured', INSTRUMENT_DECLINED: 'Card declined', VOIDED: 'Voided', EXPIRED: 'Expired' }[s] || s);
+const statusClass = (s) => s === 'COMPLETED' ? 'ok' : PROBLEM.includes(s) ? 'bad' : REFUND.includes(s) || s === 'APPROVED' ? 'warn' : 'open';
+const statusText = (s) => ({ COMPLETED: 'Paid', CREATED: 'Checkout opened', APPROVED: 'Approved, not captured', PAYER_ACTION_REQUIRED: 'Waiting for the buyer', SAVED: 'Saved, not captured', INSTRUMENT_DECLINED: 'Card declined', VOIDED: 'Voided', EXPIRED: 'Expired', REFUNDED: 'Refunded', REVERSED: 'Reversed', DECLINED: 'Declined' }[s] || s);
+const BY = { agent: 'AI agent', person: 'PayPal button' };
 
 const ordersGrid = agGrid.createGrid($('orders'), {
   domLayout: 'autoHeight',
@@ -117,6 +120,9 @@ const ordersGrid = agGrid.createGrid($('orders'), {
     { field: 'status', headerName: 'PayPal status', minWidth: 170,
       cellRenderer: (p) => p.node.rowPinned ? p.value : pill(statusText(p.value), statusClass(p.value)),
       filterValueGetter: (p) => statusText(p.data.status) },
+    { field: 'createdBy', headerName: 'Order created by', minWidth: 150,
+      cellRenderer: (p) => p.node.rowPinned ? (p.value || '') : pill(BY[p.value] || 'PayPal button', p.value === 'agent' ? 'plan3' : 'plan1'),
+      filterValueGetter: (p) => BY[p.data.createdBy] || 'PayPal button' },
     { field: 'recommended', headerName: 'AI recommended', minWidth: 140,
       cellRenderer: (p) => p.node.rowPinned ? '' : p.value ? pill(PLAN[p.value], p.value === 'ladder_3m' ? 'plan3' : 'plan1') : 'n/a',
       filterValueGetter: (p) => PLAN[p.data.recommended] || 'n/a' },
@@ -133,6 +139,10 @@ const ordersGrid = agGrid.createGrid($('orders'), {
     { field: 'lang', headerName: 'Language', valueFormatter: (p) => LANG[p.value] ?? p.value, filterValueGetter: (p) => LANG[p.data.lang] },
     { field: 'orderId', headerName: 'PayPal order', cellClass: 'mono', minWidth: 170 },
     { field: 'captureId', headerName: 'PayPal capture', cellClass: 'mono', minWidth: 170 },
+    { field: 'webhooks', headerName: 'PayPal webhooks', minWidth: 190,
+      valueGetter: (p) => p.node.rowPinned ? p.data.webhooks : (p.data.webhooks ? p.data.webhooks + ', last ' + (p.data.lastEvent || '') : ''),
+      cellClass: 'mono' },
+    { field: 'refundId', headerName: 'PayPal refund', cellClass: 'mono', minWidth: 160 },
   ],
   isExternalFilterPresent: () => statusFilter !== 'all',
   doesExternalFilterPass: (node) => {
@@ -140,6 +150,7 @@ const ordersGrid = agGrid.createGrid($('orders'), {
     if (statusFilter === 'paid') return s === 'COMPLETED';
     if (statusFilter === 'open') return OPEN.includes(s);
     if (statusFilter === 'problem') return PROBLEM.includes(s);
+    if (statusFilter === 'refunded') return REFUND.includes(s);
     return true;
   },
   onFilterChanged: updateFromGrid,
@@ -179,9 +190,13 @@ function updateFromGrid() {
   const paidAdvised = paid.filter((r) => r.followedAdvice !== null);
   const paidFollowed = paidAdvised.filter((r) => r.followedAdvice).length;
   const revenue = paid.reduce((s, r) => s + Number(r.amount), 0);
+  const refunded = rows.filter((r) => REFUND.includes(r.status));
+  const byAgent = rows.filter((r) => r.createdBy === 'agent').length;
+  const hooks = rows.reduce((s, r) => s + (r.webhooks || 0), 0);
   ordersGrid.setGridOption('pinnedBottomRowData', [{
     createdAt: '', status: rows.length + ' orders', followedAdvice: advised.length ? Math.round(100 * followed / advised.length) + '% followed' : '',
     amount: revenue, orderId: paid.length + ' paid', captureId: '', steps: '', lang: '', recommended: '', chosen: '',
+    createdBy: byAgent + ' by AI agent', webhooks: hooks ? hooks + ' events' : '', refundId: refunded.length ? refunded.length + ' refunded' : '',
   }]);
   const conv = allDays.reduce((s, d) => s + d.conversations, 0);
   const recs = allDays.reduce((s, d) => s + d.recommendations, 0);
@@ -191,11 +206,11 @@ function updateFromGrid() {
     [conv, 'Conversations, 30 days'],
     [recs, 'AI recommendations' + (recs ? ', ' + Math.round(100 * r3 / recs) + '% for 3 months' : '')],
     [safety, 'Safety handoffs, no checkout shown'],
-    [rows.length, 'PayPal orders' + (statusFilter !== 'all' || ordersGrid.isAnyFilterPresent() ? ' (filtered)' : '')],
+    [rows.length, 'PayPal orders, ' + byAgent + ' created by the AI agent' + (statusFilter !== 'all' || ordersGrid.isAnyFilterPresent() ? ' (filtered)' : '')],
     [paid.length, 'Paid' + (rows.length ? ', ' + Math.round(100 * paid.length / rows.length) + '% of orders' : '')],
-    [money(revenue), 'Captured revenue (sandbox)'],
+    [money(revenue), 'Net revenue after refunds (sandbox)'],
     [paidAdvised.length ? Math.round(100 * paidFollowed / paidAdvised.length) + '%' : 'n/a', 'Paid orders on the plan the AI recommended'],
-    [recs ? Math.round(100 * allOrders.length / recs) + '%' : 'n/a', 'Recommendations that opened PayPal'],
+    [refunded.length, 'Refunded under the 14-day guarantee' + (hooks ? ', ' + hooks + ' verified webhooks' : '')],
   ];
   const box = $('kpis');
   box.replaceChildren(...kpis.map(([v, l]) => {

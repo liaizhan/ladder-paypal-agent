@@ -1,10 +1,13 @@
-import { advise, firstStep, sanitize, type AiBinding, type Ladder } from './agent.ts';
+import { advise, checkoutAgent, firstStep, sanitize, type AiBinding, type Ladder } from './agent.ts';
 import { PLANS, planOrNull } from './catalog.ts';
-import { captureOrder, createOrder, getOrderStatuses } from './paypal.ts';
+import { captureOrder, createOrder, eventToUpdate, getCapture, getOrderStatuses, refundCapture, verifyWebhook, webhookHeaders } from './paypal.ts';
 import { expiryFrom, signPass, signRecommendation, verifyPass, verifyRecommendation } from './pass.ts';
 import {
+  applyWebhook,
   countChat,
   detectLang,
+  linkCapture,
+  orderIdForCapture,
   isFinal,
   listDays,
   listOrders,
@@ -26,8 +29,11 @@ export interface Env {
   PAYPAL_CLIENT_ID: string;
   PAYPAL_CLIENT_SECRET: string;
   PASS_SECRET: string;
+  PAYPAL_WEBHOOK_ID?: string;
   LADDER_ORDERS?: KVNamespace;
 }
+
+const REFUND_DAYS = 14;
 
 interface Ctx {
   waitUntil(p: Promise<unknown>): void;
@@ -90,13 +96,32 @@ export default {
         }
         const turn = await advise(env.AI, env.AI_MODEL, history);
         let recToken: string | null = null;
+        let agentOrder: { id: string; plan: string; tool: string } | null = null;
         if (turn.stage === 'recommend' && turn.plan) {
           events.push({ kind: 'recommend', plan: turn.plan });
           const lang = detectLang(history.filter((m) => m.role === 'user').map((m) => m.content).join(' '));
-          recToken = await signRecommendation(env.PASS_SECRET, { plan: turn.plan, steps: turn.ladder?.obstacles.length ?? 0, lang });
+          const steps = turn.ladder?.obstacles.length ?? 0;
+          recToken = await signRecommendation(env.PASS_SECRET, { plan: turn.plan, steps, lang });
+          // The checkout agent may call create_paypal_order. The price comes from the catalog,
+          // and the person still approves the payment in PayPal.
+          try {
+            const agentPlan = planOrNull(await checkoutAgent(env.AI, env.AI_MODEL, history, turn.plan));
+            if (agentPlan) {
+              const id = await createOrder(env, agentPlan, turn.ladder);
+              agentOrder = { id, plan: agentPlan.id, tool: `create_paypal_order(plan_id="${agentPlan.id}")` };
+              if (env.LADDER_ORDERS) {
+                background(
+                  ctx,
+                  saveOrder(env.LADDER_ORDERS, newOrderRecord({ orderId: id, chosen: agentPlan.id, recommended: turn.plan, steps, lang, createdBy: 'agent' })),
+                );
+              }
+            }
+          } catch (err) {
+            console.log(JSON.stringify({ event: 'agent_order_error', message: String(err) }));
+          }
         }
         if (env.LADDER_ORDERS) background(ctx, countChat(env.LADDER_ORDERS, events));
-        return json({ ...turn, recToken });
+        return json({ ...turn, recToken, agentOrder });
       }
 
       if (request.method === 'POST' && pathname === '/api/orders') {
@@ -132,9 +157,12 @@ export default {
           if (kv) background(ctx, updateOrder(kv, capture[1], { status: result.status || 'FAILED' }));
           return json({ error: 'payment not completed', status: result.status }, 402);
         }
-        if (kv) background(ctx, updateOrder(kv, capture[1], { status: 'COMPLETED', captureId: result.captureId }));
+        if (kv) {
+          background(ctx, updateOrder(kv, capture[1], { status: 'COMPLETED', captureId: result.captureId }));
+          background(ctx, linkCapture(kv, result.captureId, capture[1]));
+        }
         const expires = expiryFrom(new Date(), plan.days);
-        const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: result.captureId, expires });
+        const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: result.captureId, expires, orderId: capture[1] });
         const ladder = cleanLadder(body.ladder);
         let step = '';
         if (ladder) {
@@ -196,7 +224,59 @@ export default {
       if (request.method === 'GET' && pathname === '/api/pass') {
         const token = url.searchParams.get('token') ?? '';
         const pass = await verifyPass(env.PASS_SECRET, token);
-        return json(pass ? { active: true, ...pass } : { active: false });
+        if (!pass) return json({ active: false });
+        const refunded = env.LADDER_ORDERS ? await env.LADDER_ORDERS.getWithMetadata(`refund:${pass.captureId}`) : { value: null };
+        return json(refunded.value !== null ? { active: false, refunded: true, ...pass } : { active: true, ...pass });
+      }
+
+      // 14-day refund guarantee: the signed pass proves the purchase, PayPal confirms
+      // the capture, its age and its amount, then Payments v2 refunds the full amount.
+      if (request.method === 'POST' && pathname === '/api/refund') {
+        const body = await readJson(request);
+        const pass = await verifyPass(env.PASS_SECRET, String(body.pass ?? ''));
+        if (!pass) return json({ error: 'invalid pass' }, 401);
+        const kv = env.LADDER_ORDERS;
+        if (kv) {
+          const done = await kv.getWithMetadata(`refund:${pass.captureId}`);
+          if (done.value !== null) return json({ refunded: true, refundId: done.value, already: true });
+        }
+        const cap = await getCapture(env, pass.captureId);
+        if (!cap) return json({ error: 'capture not found' }, 404);
+        const plan = planOrNull(cap.planId);
+        if (cap.status !== 'COMPLETED' && cap.status !== 'PARTIALLY_REFUNDED') return json({ error: 'not refundable', status: cap.status }, 409);
+        if (!plan || cap.amount !== plan.amount) return json({ error: 'amount mismatch' }, 409);
+        if (Date.now() - Date.parse(cap.createTime) > REFUND_DAYS * 86_400_000) return json({ error: 'refund window closed' }, 403);
+        const refund = await refundCapture(env, pass.captureId);
+        if (kv) {
+          const orderId = pass.orderId || cap.orderId || (await orderIdForCapture(kv, pass.captureId));
+          await kv.put(`refund:${pass.captureId}`, refund.id, { expirationTtl: 60 * 60 * 24 * 120 });
+          if (orderId) background(ctx, updateOrder(kv, orderId, { status: 'REFUNDED', refundId: refund.id }));
+        }
+        return json({ refunded: true, refundId: refund.id, status: refund.status, amount: cap.amount });
+      }
+
+      // PayPal webhook: the signature is checked by PayPal, every event id is applied once,
+      // and a late event never moves an order back (a refund stays a refund).
+      if (request.method === 'POST' && pathname === '/api/paypal/webhook') {
+        const raw = await request.text();
+        let event: any;
+        try {
+          event = JSON.parse(raw);
+        } catch {
+          return json({ error: 'bad json' }, 400);
+        }
+        const h = webhookHeaders(request.headers);
+        if (!h || !(await verifyWebhook(env, h, event))) return json({ error: 'signature not verified' }, 401);
+        const update = eventToUpdate(event);
+        let result = 'ignored';
+        if (update && env.LADDER_ORDERS) {
+          result = await applyWebhook(env.LADDER_ORDERS, String(event.id ?? ''), String(event.event_type ?? ''), update);
+          if (update.status === 'REFUNDED' && update.captureId) {
+            await env.LADDER_ORDERS.put(`refund:${update.captureId}`, String(event.resource?.id ?? 'webhook'), { expirationTtl: 60 * 60 * 24 * 120 });
+          }
+        }
+        console.log(JSON.stringify({ event: 'paypal_webhook', type: event.event_type, result }));
+        return json({ ok: true, result });
       }
     } catch (err) {
       console.log(JSON.stringify({ event: 'error', path: pathname, message: String(err) }));

@@ -136,3 +136,124 @@ export async function getOrderStatuses(env: PayPalEnv, orderIds: string[]): Prom
   );
   return Object.fromEntries(pairs.filter(([, st]) => st));
 }
+
+export interface CaptureInfo {
+  status: string;
+  amount: string;
+  createTime: string;
+  orderId: string;
+  planId: string;
+}
+
+/** Payments v2 GET capture: the refund checks the real capture, not the browser. */
+export async function getCapture(env: PayPalEnv, captureId: string): Promise<CaptureInfo | null> {
+  if (!/^[A-Z0-9]{8,32}$/.test(captureId)) return null;
+  const token = await accessToken(env);
+  const res = await fetch(`${apiBase(env)}/v2/payments/captures/${captureId}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`paypal capture get ${res.status}`);
+  const d = (await res.json()) as any;
+  return {
+    status: d.status ?? '',
+    amount: d.amount?.value ?? '',
+    createTime: d.create_time ?? '',
+    orderId: d.supplementary_data?.related_ids?.order_id ?? '',
+    planId: d.custom_id ?? '',
+  };
+}
+
+export interface RefundResult {
+  id: string;
+  status: string;
+}
+
+/** Payments v2 refund, full amount. PayPal-Request-Id makes a repeated click safe:
+ *  PayPal returns the same refund instead of a second one. */
+export async function refundCapture(env: PayPalEnv, captureId: string): Promise<RefundResult> {
+  if (!/^[A-Z0-9]{8,32}$/.test(captureId)) throw new Error('bad capture id');
+  const token = await accessToken(env);
+  const res = await fetch(`${apiBase(env)}/v2/payments/captures/${captureId}/refund`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'PayPal-Request-Id': `ladder-refund-${captureId}`,
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify({ note_to_payer: 'Ladder 14-day refund guarantee' }),
+  });
+  const d = (await res.json()) as any;
+  if (!res.ok || !d.id) throw new Error(`paypal refund ${res.status} ${d?.details?.[0]?.issue ?? d?.message ?? ''}`);
+  return { id: d.id, status: d.status ?? '' };
+}
+
+export interface WebhookHeaders {
+  transmissionId: string;
+  transmissionTime: string;
+  certUrl: string;
+  authAlgo: string;
+  transmissionSig: string;
+}
+
+export function webhookHeaders(h: Headers): WebhookHeaders | null {
+  const w = {
+    transmissionId: h.get('paypal-transmission-id') ?? '',
+    transmissionTime: h.get('paypal-transmission-time') ?? '',
+    certUrl: h.get('paypal-cert-url') ?? '',
+    authAlgo: h.get('paypal-auth-algo') ?? '',
+    transmissionSig: h.get('paypal-transmission-sig') ?? '',
+  };
+  return Object.values(w).every(Boolean) ? w : null;
+}
+
+/** PayPal checks the signature of its own webhook (Notifications API). */
+export async function verifyWebhook(env: PayPalEnv & { PAYPAL_WEBHOOK_ID?: string }, h: WebhookHeaders, event: unknown): Promise<boolean> {
+  if (!env.PAYPAL_WEBHOOK_ID) return false;
+  const token = await accessToken(env);
+  const res = await fetch(`${apiBase(env)}/v1/notifications/verify-webhook-signature`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      transmission_id: h.transmissionId,
+      transmission_time: h.transmissionTime,
+      cert_url: h.certUrl,
+      auth_algo: h.authAlgo,
+      transmission_sig: h.transmissionSig,
+      webhook_id: env.PAYPAL_WEBHOOK_ID,
+      webhook_event: event,
+    }),
+  });
+  if (!res.ok) return false;
+  const d = (await res.json()) as { verification_status?: string };
+  return d.verification_status === 'SUCCESS';
+}
+
+export interface WebhookUpdate {
+  orderId: string;
+  captureId: string;
+  status: string;
+}
+
+/** Turns a PayPal event into a ledger update. Unknown events are ignored. */
+export function eventToUpdate(event: any): WebhookUpdate | null {
+  const type = String(event?.event_type ?? '');
+  const r = event?.resource ?? {};
+  const upCapture = () => {
+    const up = (r.links ?? []).find((l: any) => l.rel === 'up')?.href ?? '';
+    return String(up).match(/captures\/([A-Z0-9]+)/)?.[1] ?? '';
+  };
+  switch (type) {
+    case 'CHECKOUT.ORDER.APPROVED':
+      return { orderId: String(r.id ?? ''), captureId: '', status: 'APPROVED' };
+    case 'PAYMENT.CAPTURE.COMPLETED':
+      return { orderId: String(r.supplementary_data?.related_ids?.order_id ?? ''), captureId: String(r.id ?? ''), status: 'COMPLETED' };
+    case 'PAYMENT.CAPTURE.DENIED':
+      return { orderId: String(r.supplementary_data?.related_ids?.order_id ?? ''), captureId: String(r.id ?? ''), status: 'DECLINED' };
+    case 'PAYMENT.CAPTURE.REFUNDED':
+      return { orderId: '', captureId: upCapture(), status: 'REFUNDED' };
+    case 'PAYMENT.CAPTURE.REVERSED':
+      return { orderId: '', captureId: upCapture() || String(r.id ?? ''), status: 'REVERSED' };
+    default:
+      return null;
+  }
+}

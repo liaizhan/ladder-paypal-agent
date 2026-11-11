@@ -25,9 +25,13 @@ export interface OrderRecord {
   amount: string; // from the server catalog
   steps: number; // number of obstacles on the ladder, no text
   lang: Lang | '';
-  status: string; // CREATED, APPROVED, COMPLETED, INSTRUMENT_DECLINED, VOIDED, EXPIRED
+  status: string; // CREATED, APPROVED, COMPLETED, REFUNDED, INSTRUMENT_DECLINED, VOIDED, EXPIRED
   captureId: string;
   updatedAt: string;
+  createdBy?: 'agent' | 'person'; // the AI agent's tool call, or the PayPal button
+  refundId?: string;
+  webhooks?: number; // verified PayPal webhook events applied to this order
+  lastEvent?: string; // last verified PayPal event type
 }
 
 export interface DayStats {
@@ -39,7 +43,7 @@ export interface DayStats {
   safetyHandoffs: number;
 }
 
-const FINAL = new Set(['COMPLETED', 'VOIDED', 'EXPIRED']);
+const FINAL = new Set(['COMPLETED', 'REFUNDED', 'REVERSED', 'DECLINED', 'VOIDED', 'EXPIRED']);
 
 export function isFinal(status: string): boolean {
   return FINAL.has(status);
@@ -58,6 +62,7 @@ export function newOrderRecord(input: {
   recommended: unknown;
   steps: number;
   lang: unknown;
+  createdBy?: 'agent' | 'person';
   now?: Date;
 }): OrderRecord {
   const now = (input.now ?? new Date()).toISOString();
@@ -73,6 +78,8 @@ export function newOrderRecord(input: {
     status: 'CREATED',
     captureId: '',
     updatedAt: now,
+    createdBy: input.createdBy ?? 'person',
+    webhooks: 0,
   };
 }
 
@@ -92,6 +99,51 @@ export async function updateOrder(kv: KVNamespace, id: string, patch: Partial<Or
   const rec = await getOrder(kv, id);
   if (!rec) return;
   await saveOrder(kv, { ...rec, ...patch, updatedAt: new Date().toISOString() });
+}
+
+const TTL = 60 * 60 * 24 * 120;
+
+/** capture id -> order id, so a refund or a refund webhook finds its order. */
+export async function linkCapture(kv: KVNamespace, captureId: string, orderId: string): Promise<void> {
+  if (captureId && orderId) await kv.put(`capture:${captureId}`, orderId, { expirationTtl: TTL });
+}
+
+export async function orderIdForCapture(kv: KVNamespace, captureId: string): Promise<string> {
+  const { value } = await kv.getWithMetadata(`capture:${captureId}`);
+  return value ?? '';
+}
+
+// A later PayPal state never goes back: a late APPROVED event cannot undo a refund.
+const RANK: Record<string, number> = { CREATED: 0, PAYER_ACTION_REQUIRED: 0, SAVED: 0, APPROVED: 1, COMPLETED: 2, DECLINED: 2, INSTRUMENT_DECLINED: 1, REFUNDED: 3, REVERSED: 3 };
+
+export function nextStatus(current: string, incoming: string): string {
+  return (RANK[incoming] ?? 0) >= (RANK[current] ?? 0) ? incoming : current;
+}
+
+/** Applies one verified webhook event. Returns false if the event id was seen before. */
+export async function applyWebhook(
+  kv: KVNamespace,
+  eventId: string,
+  eventType: string,
+  update: { orderId: string; captureId: string; status: string },
+): Promise<'applied' | 'duplicate' | 'unknown-order'> {
+  const seenKey = `wh:${eventId}`;
+  const seen = await kv.getWithMetadata(seenKey);
+  if (seen.value !== null) return 'duplicate';
+  await kv.put(seenKey, eventType, { expirationTtl: 60 * 60 * 24 * 30 });
+  const orderId = update.orderId || (update.captureId ? await orderIdForCapture(kv, update.captureId) : '');
+  const rec = orderId ? await getOrder(kv, orderId) : null;
+  if (!rec) return 'unknown-order';
+  if (update.captureId && update.status === 'COMPLETED') await linkCapture(kv, update.captureId, orderId);
+  await saveOrder(kv, {
+    ...rec,
+    status: nextStatus(rec.status, update.status),
+    captureId: rec.captureId || (update.status === 'COMPLETED' ? update.captureId : ''),
+    webhooks: (rec.webhooks ?? 0) + 1,
+    lastEvent: eventType,
+    updatedAt: new Date().toISOString(),
+  });
+  return 'applied';
 }
 
 export async function listOrders(kv: KVNamespace, max = 500): Promise<OrderRecord[]> {
@@ -167,7 +219,7 @@ export async function listDays(kv: KVNamespace, days = 30, now = new Date()): Pr
 
 /** Public view: order ids of unfinished orders are masked, so nobody can act on them. */
 export function publicOrder(rec: OrderRecord): OrderRecord & { followedAdvice: boolean | null } {
-  const masked = rec.status === 'COMPLETED' ? rec.orderId : '...' + rec.orderId.slice(-5);
+  const masked = rec.captureId ? rec.orderId : '...' + rec.orderId.slice(-5);
   return {
     ...rec,
     orderId: masked,

@@ -7,7 +7,8 @@
   "vars": {
     "PAYPAL_ENV": "sandbox",
     "PAYPAL_CLIENT_ID": "BAANuxRRBT8PW9ZN-Z_Zpx1ouEMEO4n1hmWncKoZ98eDdddiL_GLZ1cQkGYHBWZASPKIBbp_gHC2CTb_2A",
-    "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    "AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "PAYPAL_WEBHOOK_ID": "06G585460C121933H"
   }
   // Secrets (wrangler secret put): PAYPAL_CLIENT_SECRET, PASS_SECRET
 }

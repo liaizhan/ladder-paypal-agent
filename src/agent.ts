@@ -156,3 +156,84 @@ export async function firstStep(ai: AiBinding, model: string, ladder: Ladder): P
   const step = (data as { step?: unknown }).step;
   return typeof step === 'string' && step.trim() ? step.trim().slice(0, 600) : '';
 }
+
+// The checkout agent. After the advisor recommends a plan, a second model call
+// may use one tool, create_paypal_order. The tool only prepares a PayPal order:
+// money moves only when the person approves it in PayPal. The model never sets
+// an amount; the server takes the price from the catalog.
+
+const CHECKOUT_PROMPT = `You are the Ladder checkout agent. The plan advisor has just recommended a plan to the person.
+You must call exactly one of two tools:
+- create_paypal_order prepares a PayPal order. It never charges money: the person approves the payment in PayPal themselves or simply closes it.
+- skip_order is for when the person explicitly said they do not want to buy or pay, or asked not to be sold to.
+Choosing the plan: use the plan the person asked for in their own words ("only one month" means ladder_1m, "three months" means ladder_3m). If they did not ask, use the recommended plan.
+Money worries, doubts, fears or "I have no savings" are part of the ladder, not a refusal: still create the order.`;
+
+export const SKIP_TOOL = {
+  type: 'function',
+  function: {
+    name: 'skip_order',
+    description: 'Do not prepare an order, because the person explicitly refused to buy or asked not to be sold to.',
+    parameters: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] },
+  },
+};
+
+export const CHECKOUT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_paypal_order',
+    description: 'Prepare a PayPal order for a Ladder plan. The person approves the payment in PayPal; this tool never charges money.',
+    parameters: {
+      type: 'object',
+      properties: {
+        plan_id: { type: 'string', enum: ['ladder_1m', 'ladder_3m'], description: 'ladder_1m is 1 month, ladder_3m is 3 months' },
+      },
+      required: ['plan_id'],
+    },
+  },
+};
+
+/** Reads a create_paypal_order call from a Workers AI answer (both tool_calls shapes). */
+export function parseCheckoutCall(result: unknown): PlanId | null {
+  const r = (result ?? {}) as Record<string, any>;
+  // Workers AI returns either { tool_calls } or the OpenAI shape { choices: [{ message: { tool_calls } }] }.
+  const raw = r.tool_calls ?? r.choices?.[0]?.message?.tool_calls;
+  const calls = Array.isArray(raw) ? raw : [];
+  for (const c of calls as Array<Record<string, any>>) {
+    const name = c?.name ?? c?.function?.name;
+    if (name !== 'create_paypal_order') continue;
+    let args: unknown = c?.arguments ?? c?.function?.arguments ?? {};
+    if (typeof args === 'string') {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        continue;
+      }
+    }
+    const plan = (args as Record<string, unknown>)?.plan_id;
+    if (isPlanId(plan)) return plan;
+  }
+  return null;
+}
+
+export async function checkoutAgent(ai: AiBinding, model: string, history: ChatMessage[], recommended: PlanId): Promise<PlanId | null> {
+  const words = history
+    .filter((m) => m.role === 'user')
+    .map((m) => m.content)
+    .join(' / ')
+    .slice(-1500);
+  const result = await ai.run(model, {
+    messages: [
+      { role: 'system', content: CHECKOUT_PROMPT },
+      ...history,
+      {
+        role: 'system',
+        content: `The advisor recommended ${recommended}. The person's own words: "${words}". Did they refuse to buy? Did they name a plan length? Call one tool now.`,
+      },
+    ],
+    tools: [CHECKOUT_TOOL, SKIP_TOOL],
+    max_tokens: 200,
+    temperature: 0.1,
+  });
+  return parseCheckoutCall(result);
+}
