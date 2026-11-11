@@ -51,6 +51,7 @@ import { renderGift } from './gift.ts';
 import { handleRpc, type McpDeps } from './mcp.ts';
 import { renderReturn } from './returnPage.ts';
 import { askGrid, cleanQuestion } from './ask.ts';
+import { askPlan, buildPlan } from './plan.ts';
 
 export interface Env {
   AI: AiBinding;
@@ -474,6 +475,40 @@ export default {
           }
         }
         return json({ orders: orders.map(publicOrder), days, gifts: gifts.map(publicGift), reconciled, generatedAt: new Date().toISOString() });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/plan') {
+        // The ladder plan for the Bryntum Gantt. Before payment it is a draft from today;
+        // with a signed pass it starts on the capture day; after a refund its steps are closed.
+        // The ladder comes from the browser and is not stored.
+        const body = await readJson(request);
+        const ladder = cleanLadder(body.ladder);
+        if (!ladder || !ladder.obstacles.length) return json({ error: 'ladder required' }, 400);
+        let plan = planOrNull(body.plan);
+        let startDate = new Date().toISOString().slice(0, 10);
+        let status: 'draft' | 'active' | 'refunded' = 'draft';
+        let captureId: string | undefined;
+        let refundId: string | undefined;
+        if (body.pass) {
+          const pass = await verifyPass(env.PASS_SECRET, String(body.pass));
+          const paid = pass ? planOrNull(pass.plan) : null;
+          if (!pass || !paid) return json({ error: 'invalid pass' }, 401);
+          plan = paid;
+          startDate = new Date(Date.parse(pass.expires) - paid.days * 86_400_000).toISOString().slice(0, 10);
+          captureId = pass.captureId;
+          status = 'active';
+          const refunded = env.LADDER_ORDERS ? await env.LADDER_ORDERS.getWithMetadata(`refund:${pass.captureId}`) : { value: null };
+          if (refunded.value !== null) { status = 'refunded'; refundId = typeof refunded.value === 'string' ? refunded.value : undefined; }
+        }
+        if (!plan) return json({ error: 'unknown plan' }, 400);
+        let args: Record<string, unknown> | null = null;
+        try {
+          args = await askPlan(env.AI, env.AI_MODEL, ladder, plan.days);
+        } catch {
+          args = null; // an even split still gives a full plan
+        }
+        const result = buildPlan({ ladder, totalDays: plan.days, startDate, status, captureId, refundId, args });
+        return json({ ...result, plan: plan.id, toolCall: args ? JSON.stringify(args).slice(0, 400) : null });
       }
 
       if (request.method === 'GET' && pathname === '/api/pass') {

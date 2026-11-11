@@ -51,6 +51,10 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
   .plan .tag { display:inline-block; font-size:12px; font-weight:600; color:var(--blue); margin-bottom:4px; min-height:18px; }
   .reason { background:var(--tile); border-radius:12px; padding:12px 14px; font-size:15px; }
   .fine { color:var(--muted); font-size:13px; margin-top:10px; }
+  .plan-box { margin-top:12px; }
+  .plan-gantt { height:380px; border:1px solid var(--line); border-radius:12px; overflow:hidden; margin-top:8px; }
+  .plan-cap { color:var(--muted); font-size:13px; margin:8px 0 0; }
+  .plan-cap code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--ink); word-break:break-all; }
   .ok { color:var(--ok); font-weight:600; }
   #paypal-buttons { margin-top:14px; min-height:50px; }
   .guards { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; }
@@ -92,6 +96,8 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <div class="reason" id="reason"></div>
     <div class="guards" id="guards" aria-label="Guardrails that ran on this turn"></div>
     <div class="plans" id="plans"></div>
+    <button type="button" class="ghost" id="plan-btn">See your plan on a timeline</button>
+    <div class="plan-box" id="plan-preview" aria-live="polite"></div>
     <div id="paypal-buttons"></div>
     <p id="pay-status" class="sub" aria-live="polite"></p>
     <button type="button" class="ghost" id="break-btn">Try to make it $1</button>
@@ -103,6 +109,7 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <h2 class="ok">Access is active</h2>
     <p id="done-text"></p>
     <div class="reason" id="first-step"></div>
+    <div class="plan-box" id="plan-done" aria-live="polite"></div>
     <p class="fine" id="pass-check"></p>
     <button type="button" class="ghost" id="refund-btn">Request a refund (14-day guarantee)</button>
     <p class="fine" id="refund-status" aria-live="polite"></p>
@@ -234,7 +241,90 @@ function renderPlans() {
     b.onclick = () => { state.plan = p.id; renderPlans(); };
     box.appendChild(b);
   });
+  const chosen = CONFIG.plans.find((p) => p.id === state.plan);
+  $('plan-btn').textContent = 'See your ' + (chosen ? chosen.days : 30) + '-day plan on a timeline';
 }
+
+// Bryntum Gantt (trial build) loads only when someone asks for the timeline.
+const BRY = 'https://cdn.jsdelivr.net/npm/@bryntum/gantt-trial@7.3.8/';
+const BRY_CSS = [
+  ['fontawesome/css/fontawesome.css', 'sha384-N/HxUPjGYXuq90qENJW4UQ6Vq8yZ3/QICew+C8+4qRK01TPldW3DoXtdBFW1z7Cw'],
+  ['fontawesome/css/solid.css', 'sha384-d0/7jDoEiY/WF2esXosaOUW5d0p4j5ydbnE5M4i05cBN4x7k4gZVMDgq1x0mcF1P'],
+  ['gantt.css', 'sha384-xv6n/FQ9l+WW9IFONv3kb/CeNtAM08R0ECuGxShdhJymM7x4TbMPlEODqru0FaTM'],
+  ['stockholm-light.css', 'sha384-/BMbHl9I2Ie1/FgBwQ0oVmRT7CX0yAedq7q/L0jHP5ndUhCWqfMOZG0cpcEyVv+w'],
+];
+let bryntumReady = null;
+function loadBryntum() {
+  if (bryntumReady) return bryntumReady;
+  bryntumReady = new Promise((resolve, reject) => {
+    BRY_CSS.forEach(([f, h]) => {
+      const l = document.createElement('link');
+      l.rel = 'stylesheet'; l.href = BRY + f; l.integrity = h; l.crossOrigin = 'anonymous';
+      if (f === 'stockholm-light.css') l.setAttribute('data-bryntum-theme', '');
+      document.head.appendChild(l);
+    });
+    const sc = document.createElement('script');
+    sc.src = BRY + 'gantt.umd.js';
+    sc.integrity = 'sha384-g8MbJtJxFZKBvEs/RABtMHbV7fkWRAapZ2jES+HkwX5PeXAdAp6+JCj+f0lRMPey';
+    sc.crossOrigin = 'anonymous';
+    sc.onload = () => resolve(window.bryntum.gantt);
+    sc.onerror = () => { bryntumReady = null; reject(new Error('gantt did not load')); };
+    document.head.appendChild(sc);
+  });
+  return bryntumReady;
+}
+
+const gantts = {};
+const longDate = (d) => new Date(d + 'T00:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+async function showPlan(boxId, body) {
+  const box = $(boxId);
+  if (gantts[boxId]) { gantts[boxId].destroy(); delete gantts[boxId]; }
+  box.replaceChildren();
+  const cap = document.createElement('p');
+  cap.className = 'plan-cap';
+  cap.textContent = 'The AI is splitting your access period between the steps...';
+  box.append(cap);
+  try {
+    const res = await fetch('/api/plan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'plan failed');
+    const B = await loadBryntum();
+    const colors = { payment: 'green', 'refund-window': 'orange', step: r.status === 'draft' ? 'gray' : 'blue', goal: r.status === 'draft' ? 'gray' : 'indigo', refund: 'red' };
+    const tasks = r.tasks.map((t) => ({ id: t.id, name: t.name, startDate: t.startDate, duration: t.duration, manuallyScheduled: !!t.manuallyScheduled, note: t.note || '', inactive: !!t.inactive, eventColor: colors[t.kind] || 'blue' }));
+    const holder = document.createElement('div');
+    holder.className = 'plan-gantt';
+    box.append(holder);
+    gantts[boxId] = new B.Gantt({
+      appendTo: holder,
+      project: { startDate: r.startDate, tasksData: tasks, dependenciesData: r.dependencies },
+      columns: [{ type: 'name', width: 210 }, { type: 'startdate', width: 110 }, { type: 'duration', width: 90 }, { type: 'note', text: 'Practice', width: 230 }],
+      subGridConfigs: { locked: { width: Math.round(Math.min(440, holder.clientWidth * 0.45)) } },
+      viewPreset: 'weekAndMonth',
+      features: { projectLines: false },
+    });
+    // Show the whole access period at once, from the payment to the goal.
+    try { await gantts[boxId].project.commitAsync(); gantts[boxId].zoomToFit({ leftMargin: 20, rightMargin: 40 }); } catch (e) {}
+    const lead = r.status === 'draft'
+      ? 'Draft plan, ' + longDate(r.startDate) + ' to ' + longDate(r.endDate) + '. It turns on when PayPal confirms the payment, and the dates move to the payment day.'
+      : r.status === 'refunded'
+        ? 'Plan closed by the PayPal refund. The steps are switched off.'
+        : 'Your plan from ' + longDate(r.startDate) + ' to ' + longDate(r.endDate) + ', tied to the PayPal payment. Drag a step and the next steps move with it.';
+    const how = r.source === 'ai'
+      ? ' The AI chose the days and a practice for each step; the server fitted them into your ' + r.totalDays + '-day access.'
+      : ' The AI did not answer, so the days are split evenly.';
+    cap.textContent = lead + how;
+    if (r.toolCall) {
+      const raw = document.createElement('p');
+      raw.className = 'plan-cap';
+      raw.append('Tool call the model wrote: ');
+      const code = document.createElement('code'); code.textContent = 'schedule_ladder_steps ' + r.toolCall; raw.append(code);
+      box.append(raw);
+    }
+  } catch (e) {
+    cap.textContent = 'The timeline could not load. Your ladder and payment are not affected.';
+  }
+}
+$('plan-btn').addEventListener('click', () => { if (state.ladder) showPlan('plan-preview', { ladder: state.ladder, plan: state.plan }); });
 
 function loadPayPal() {
   if (state.sdkLoaded) return;
@@ -277,6 +367,7 @@ function renderButtons() {
       try { localStorage.setItem('ladderPass', r.pass); } catch (e) {}
       const check = await fetch('/api/pass?token=' + encodeURIComponent(r.pass)).then((x) => x.json());
       $('pass-check').textContent = check.active ? 'Signed access pass verified by the server: ' + check.plan + ', expires ' + check.expires.slice(0, 10) + '.' : '';
+      if (state.ladder) showPlan('plan-done', { ladder: state.ladder, pass: r.pass });
     },
     onError: () => { $('pay-status').textContent = 'PayPal could not complete the payment. Please try again.'; },
   }).render('#paypal-buttons');
@@ -300,6 +391,7 @@ $('refund-btn').addEventListener('click', async () => {
     $('refund-status').textContent = 'Refunded' + (r.amount ? ' $' + r.amount : '') + '. PayPal refund ' + r.refundId + '. Access pass is now ' + (check.active ? 'active' : 'closed') + '.';
     $('pass-check').textContent = '';
     try { localStorage.removeItem('ladderPass'); } catch (e) {}
+    if (state.ladder) showPlan('plan-done', { ladder: state.ladder, pass: state.pass });
   } catch (e) {
     $('refund-btn').disabled = false;
     $('refund-status').textContent = e.message === 'refund window closed' ? 'The 14-day refund window has closed.' : 'The refund did not go through. Please try again.';

@@ -101,6 +101,7 @@ Design rules:
 - **The gift note is checked.** The note the AI writes for employees is dropped and replaced with a standard one if it mentions prices, money, doctors, therapy or cures.
 - **Guardrails you can see.** Under every recommendation the page shows which checks ran on that turn: the crisis check, the plan id taken from a fixed list, the price set by the server and the approval in PayPal, or "Refusal respected" when the agent called `skip_order`. The chips are built from the real tool call, not from fixed text.
 - **Try to break it.** The "Try to make it $1" button sends a prompt injection to the checkout agent and shows the raw tool call the model wrote, then runs the same functions the order and capture routes use on a tampered browser request and a $1 capture. In the live test the model did try `plan_id="ladder_free"`, and the server accepted nothing. The test creates no PayPal order and no ledger record.
+- **A plan on a timeline that follows PayPal.** "See your 90-day plan on a timeline" draws the ladder on a Bryntum Gantt chart. The AI decides how many days each obstacle gets and names one practice for it; the server fits the days into the access period. Before payment the plan is a gray draft, after the PayPal capture it starts on the payment day, and after a refund its steps are switched off.
 - **Other AI agents can buy, people still approve.** The MCP server at `/mcp` lets any MCP client prepare a PayPal order, but it gets back only an approval link. The plan id comes from an enum, the price from the server catalog, the goal goes through the crisis check, and PayPal sends the person back to `/return`, where the server captures and checks the amount.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
 
@@ -132,6 +133,16 @@ Tools:
 - `check_ladder_order` (`order_id`): the PayPal status of that order.
 
 The agent never pays. The person opens the link, approves in PayPal and lands on `/return`, where the server captures the order, checks the plan and amount against the catalog, signs the access pass and shows a one-click refund. These orders show on the dashboard as "Agent over MCP".
+
+## Ladder plan on a timeline (Bryntum Gantt)
+
+Under the plan cards, "See your 30-day plan" or "See your 90-day plan" opens the ladder as a Gantt chart, built with Bryntum Gantt:
+
+- **The AI plans, the server checks.** Llama 3.3 70B gets the obstacles and the length of the access period and answers with one `schedule_ladder_steps` tool call: days for each obstacle and one practice of at most 8 words. Older or deeper obstacles get more days; in the live test a fear "since school" got 60 of 90 days. The server keeps at least 2 days per step, makes the days add up to the period exactly, strips markup from every text and falls back to an even split if the call is missing or wrong. The page shows the raw tool call.
+- **Payment events drive the schedule.** Before payment the plan is a gray draft from today with the milestone "Starts when PayPal confirms the payment". After the capture the page asks again with the signed access pass, and the plan starts on the capture day with the PayPal capture id as its first milestone. The 14-day refund window is a milestone of its own. After a refund the steps and the goal are switched off and a "PayPal refund ... plan closed" milestone appears.
+- **Steps are chained.** Each step depends on the one before it, and the goal depends on the last step, so dragging a step moves the rest of the plan with it. The view fits the whole period at once.
+- **Nothing is stored.** The plan is rebuilt from the ladder the browser sends; a forged pass gets 401.
+- The page uses the Bryntum Gantt trial build from npm (`@bryntum/gantt-trial` 7.3.8 on jsDelivr, with SRI hashes), loaded only when the person opens the timeline. It shows the trial watermark.
 
 ## Payments dashboard (AG Grid)
 
@@ -204,7 +215,7 @@ npx wrangler secret put PASS_SECRET
 npm run deploy
 ```
 
-Tests (catalog, guardrails and the $1 attack, the MCP server and return page, plain-words grid questions, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
+Tests (catalog, guardrails and the $1 attack, the MCP server and return page, plain-words grid questions, the Gantt plan and its day split, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
 
 ```bash
 npm test
@@ -225,11 +236,12 @@ npm test
 - `src/ledger.ts`: order ledger and chat counters in Workers KV.
 - `src/dashboard.ts`: the AG Grid payments dashboard.
 - `src/ask.ts`: plain-words questions to the grid, checked against fixed lists.
+- `src/plan.ts`: the ladder plan for the Bryntum Gantt chart, tied to the payment.
 - `src/gift.ts`: the team gift page for companies.
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard with plain-words questions were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing the Bryntum Gantt plan tied to PayPal payments and the AG Grid payments dashboard with plain-words questions were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 
