@@ -52,6 +52,7 @@ import { renderGift } from './gift.ts';
 import { handleRpc, type McpDeps } from './mcp.ts';
 import { renderReturn } from './returnPage.ts';
 import { askGrid, cleanQuestion } from './ask.ts';
+import { askPayPal, cleanAsk, makeToolkit } from './toolkit.ts';
 import { askPlan, buildPlan } from './plan.ts';
 
 export interface Env {
@@ -253,6 +254,27 @@ export default {
           return json({ question, toolCall: JSON.stringify(args).slice(0, 300), view });
         } catch {
           return json({ error: 'model unavailable' }, 503);
+        }
+      }
+
+      // "Ask PayPal": Llama 3.3 picks one read-only tool from the official PayPal Agent Toolkit.
+      if (request.method === 'POST' && pathname === '/api/ask-paypal') {
+        const body = (await request.json().catch(() => ({}))) as { question?: unknown };
+        const question = cleanAsk(body.question);
+        if (!question) return json({ error: 'empty question' }, 400);
+        if (!env.PAYPAL_CLIENT_SECRET) return json({ error: 'PayPal is not configured' }, 503);
+        const kv = env.LADDER_ORDERS;
+        const [orders, gifts] = kv ? await Promise.all([listOrders(kv, 20), listGifts(kv, 20)]) : [[], []];
+        const known = [
+          ...orders.filter((o) => o.captureId).map((o) => `order ${o.orderId}: ${o.status}, ${o.chosen}, ${o.amount} USD, ${o.createdAt.slice(0, 10)}`),
+          ...gifts.filter((g) => g.status === 'PAID').map((g) => `invoice ${g.invoiceId}: PAID, ${g.seats} seats, ${g.total} USD`),
+        ].slice(0, 8).join('\n');
+        try {
+          const toolkit = makeToolkit(env.PAYPAL_CLIENT_ID, env.PAYPAL_CLIENT_SECRET, env.PAYPAL_ENV !== 'live');
+          const out = await askPayPal(env.AI, env.AI_MODEL, toolkit, question, known);
+          return json({ question, tool: out.tool, args: out.args, answer: out.answer, result: JSON.stringify(out.result ?? null).slice(0, 4000) });
+        } catch {
+          return json({ error: 'model or PayPal unavailable' }, 503);
         }
       }
 

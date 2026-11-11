@@ -51,6 +51,11 @@ export function renderDashboard(): string {
   .ask-out { margin:8px 0 0; font-size:13px; color:var(--muted); }
   .ask-out .chip { display:inline-block; background:#e6f0fc; color:var(--blue); border-radius:999px; padding:2px 9px; margin:2px 4px 2px 0; font-weight:600; font-size:12px; }
   .ask-out code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--ink); word-break:break-all; }
+  .pp-out { margin:10px 0 0; font-size:14px; color:var(--ink); background:var(--tile); border-radius:12px; padding:12px 14px; }
+  .pp-out .chip { display:inline-block; background:#e6f0fc; color:var(--blue); border-radius:999px; padding:2px 9px; margin:0 6px 6px 0; font-weight:600; font-size:12px; }
+  .pp-out code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; word-break:break-all; }
+  .pp-out details { margin-top:8px; color:var(--muted); font-size:12px; }
+  .pp-out pre { white-space:pre-wrap; word-break:break-all; max-height:240px; overflow:auto; font-size:11px; margin:6px 0 0; }
   footer { margin-top:40px; color:var(--muted); font-size:13px; }
   @media (max-width:760px) { .kpis { grid-template-columns:repeat(2,1fr); } h1 { font-size:28px; } .bar .right { margin-left:0; } }
 </style>
@@ -63,6 +68,20 @@ export function renderDashboard(): string {
   <p class="note">Privacy: no goals, obstacles, names or emails are stored. Only plan ids, the number of steps, the language, PayPal ids and statuses. Ids of unpaid orders and invoices are masked. <a href="/">Back to the advisor</a></p>
 
   <div class="kpis" id="kpis"></div>
+
+  <h2>Ask PayPal</h2>
+  <p class="sub">Questions about your PayPal records in plain words. Llama 3.3 picks one tool from the official <a href="https://github.com/paypal/paypal-agent-toolkit" target="_blank" rel="noopener">PayPal Agent Toolkit</a>, the toolkit calls PayPal, and the AI explains the answer. Read-only: the toolkit is built with get and list actions only, so nothing can be paid, refunded or sent from here. Personal fields and payer links are hidden before the AI or this page sees them.</p>
+  <form class="ask" id="pp-form">
+    <input id="pp-q" type="text" maxlength="200" placeholder="For example: what is the status of my latest order?" aria-label="Ask PayPal a question">
+    <button type="submit" id="pp-btn">Ask PayPal</button>
+  </form>
+  <div class="ask-ex" id="pp-ex">
+    <button type="button">What is the status of my latest order?</button>
+    <button type="button">Show my latest invoices</button>
+    <button type="button">Are there any open disputes?</button>
+    <button type="button">Refund the last order</button>
+  </div>
+  <div class="pp-out" id="pp-out" aria-live="polite" hidden></div>
 
   <h2>Orders</h2>
   <p class="sub">Filter, sort and search. The cards above and the total row follow your filter.</p>
@@ -104,7 +123,7 @@ export function renderDashboard(): string {
   <div class="kpis" id="gift-kpis"></div>
   <div id="gifts" class="grid ag-theme-quartz"></div>
 
-  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2, JavaScript SDK and Invoicing v2. AI: Workers AI, Llama 3.3 70B.</footer>
+  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2, JavaScript SDK, Invoicing v2 and PayPal Agent Toolkit. AI: Workers AI, Llama 3.3 70B.</footer>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js" integrity="sha384-OEiOpwgvTUxOUC72SwfU8zDqZrWBwr0YNPNhovPbjCxdaTD0cLxMHBew/o8zuRln" crossorigin="anonymous"></script>
 <script>
@@ -380,6 +399,39 @@ async function ask(q) {
     $('ask-btn').disabled = false;
   }
 }
+async function askPayPal(q) {
+  const out = $('pp-out');
+  q = (q || '').trim();
+  if (!q) return;
+  $('pp-q').value = q;
+  $('pp-btn').disabled = true;
+  out.hidden = false;
+  out.textContent = 'The AI is picking a PayPal Agent Toolkit tool...';
+  try {
+    const res = await fetch('/api/ask-paypal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q }) });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'failed');
+    out.replaceChildren();
+    if (r.tool) {
+      const chip = document.createElement('span'); chip.className = 'chip'; chip.textContent = 'PayPal Agent Toolkit: ' + r.tool; out.append(chip);
+      const code = document.createElement('code'); code.textContent = JSON.stringify(r.args); out.append(code);
+    }
+    const p = document.createElement('p'); p.style.margin = '6px 0 0'; p.textContent = r.answer; out.append(p);
+    if (r.result && r.result !== 'null') {
+      const d = document.createElement('details');
+      const sm = document.createElement('summary'); sm.textContent = 'What PayPal returned (personal fields hidden)'; d.append(sm);
+      const pre = document.createElement('pre');
+      try { pre.textContent = JSON.stringify(JSON.parse(r.result), null, 2); } catch { pre.textContent = r.result; }
+      d.append(pre); out.append(d);
+    }
+  } catch (e) {
+    out.textContent = 'PayPal or the AI did not answer. Try again in a moment.';
+  } finally {
+    $('pp-btn').disabled = false;
+  }
+}
+$('pp-form').addEventListener('submit', (e) => { e.preventDefault(); askPayPal($('pp-q').value); });
+document.querySelectorAll('#pp-ex button').forEach((b) => b.addEventListener('click', () => askPayPal(b.textContent)));
 $('ask-form').addEventListener('submit', (e) => { e.preventDefault(); ask($('ask-q').value); });
 $('ask-clear').addEventListener('click', () => { $('ask-q').value = ''; clearView(); $('ask-out').textContent = 'View cleared.'; });
 document.querySelectorAll('#ask-ex button').forEach((b) => b.addEventListener('click', () => ask(b.textContent)));
