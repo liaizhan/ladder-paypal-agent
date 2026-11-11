@@ -80,7 +80,7 @@ function brain(env: Env) {
   if (!b) {
     b = makeClaudeBinding({
       apiKey: env.ANTHROPIC_API_KEY,
-      claudeModel: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
+      claudeModel: env.CLAUDE_MODEL || 'claude-fable-5-2',
       fallback: env.AI,
       onFallback: (reason) => console.log(JSON.stringify({ event: 'model_fallback', model: env.AI_MODEL, reason })),
     });

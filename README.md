@@ -37,7 +37,7 @@ Browser                         Cloudflare Worker                     Services
 -------                         -----------------                     --------
 chat message  --------------->  /api/chat
                                   crisis check (no AI, no sale)
-                                  advise() -------------------------> Claude Sonnet 5.5 (fallback: Llama 3.3 70B on Workers AI)
+                                  advise() -------------------------> Claude Fable 5.2 (fallback: Llama 3.3 70B on Workers AI)
                                   checkoutAgent() ------------------> Workers AI, tools:
                                                                         create_paypal_order(plan_id)
                                                                         skip_order(reason)
@@ -104,7 +104,7 @@ Design rules:
 - **A plan on a timeline that follows PayPal.** "See your 90-day plan on a timeline" draws the ladder on a Bryntum Gantt chart. The AI decides how many days each obstacle gets and names one practice for it; the server fits the days into the access period. Before payment the plan is a gray draft, after the PayPal capture it starts on the payment day, and after a refund its steps are switched off.
 - **Other AI agents can buy, people still approve.** The MCP server at `/mcp` lets any MCP client prepare a PayPal order, but it gets back only an approval link. The plan id comes from an enum, the price from the server catalog, the goal goes through the crisis check, and PayPal sends the person back to `/return`, where the server captures and checks the amount.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
-- **Claude first, Llama as fallback.** Every agent calls one small model interface. Claude Sonnet 5.5 (official Anthropic SDK, `src/claude.ts`) answers first; if the key is missing or the call fails, the same request goes to Llama 3.3 70B on Workers AI, so a model outage never stops a checkout. Every fallback is logged as `model_fallback`. The guards above do not depend on the model: the server checks tool names, enums and prices whichever model answered.
+- **Claude first, Llama as fallback.** Every agent calls one small model interface. Claude Fable 5.2 (official Anthropic SDK, `src/claude.ts`) answers first; if the key is missing or the call fails, the same request goes to Llama 3.3 70B on Workers AI, so a model outage never stops a checkout. Every fallback is logged as `model_fallback`. The guards above do not depend on the model: the server checks tool names, enums and prices whichever model answered.
 
 ## PayPal features used
 
