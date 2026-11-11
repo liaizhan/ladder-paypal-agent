@@ -155,7 +155,7 @@ const ordersGrid = agGrid.createGrid($('orders'), {
     { field: 'chosen', headerName: 'Person chose', minWidth: 130,
       valueFormatter: (p) => p.node.rowPinned ? '' : PLAN[p.value] || p.value,
       filterValueGetter: (p) => PLAN[p.data.chosen] },
-    { field: 'followedAdvice', headerName: 'Followed AI', minWidth: 120,
+    { field: 'followedAdvice', headerName: 'Followed AI', minWidth: 120, cellDataType: false, filter: 'agTextColumnFilter',
       valueFormatter: (p) => p.node.rowPinned ? (p.value || '') : p.value === null ? 'n/a' : p.value ? 'Yes' : 'Switched',
       filterValueGetter: (p) => p.data.followedAdvice === null ? 'n/a' : p.data.followedAdvice ? 'Yes' : 'Switched',
       cellClassRules: { 'ag-right-aligned-cell': () => false } },
