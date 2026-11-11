@@ -54,10 +54,14 @@ import { renderReturn } from './returnPage.ts';
 import { askGrid, cleanQuestion } from './ask.ts';
 import { askPayPal, cleanAsk, makeToolkit } from './toolkit.ts';
 import { askPlan, buildPlan } from './plan.ts';
+import { makeClaudeBinding } from './claude.ts';
 
 export interface Env {
   AI: AiBinding;
   AI_MODEL: string;
+  /** Claude answers first; without this secret every call goes to Llama on Workers AI. */
+  ANTHROPIC_API_KEY?: string;
+  CLAUDE_MODEL?: string;
   PAYPAL_ENV: string;
   PAYPAL_CLIENT_ID: string;
   PAYPAL_CLIENT_SECRET: string;
@@ -67,6 +71,23 @@ export interface Env {
 }
 
 const REFUND_DAYS = 14;
+
+// One model binding per request: Claude first, Llama 3.3 on Workers AI when Claude is not
+// configured or fails. The agents keep passing env.AI_MODEL, which is the fallback model id.
+const brains = new WeakMap<Env, ReturnType<typeof makeClaudeBinding>>();
+function brain(env: Env) {
+  let b = brains.get(env);
+  if (!b) {
+    b = makeClaudeBinding({
+      apiKey: env.ANTHROPIC_API_KEY,
+      claudeModel: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
+      fallback: env.AI,
+      onFallback: (reason) => console.log(JSON.stringify({ event: 'model_fallback', model: env.AI_MODEL, reason })),
+    });
+    brains.set(env, b);
+  }
+  return b;
+}
 
 interface Ctx {
   waitUntil(p: Promise<unknown>): void;
@@ -208,7 +229,7 @@ export default {
           if (env.LADDER_ORDERS) background(ctx, countChat(env.LADDER_ORDERS, [...events, { kind: 'safety' }]));
           return json({ reply: HELP_TEXT, stage: 'help', ladder: null, plan: null, reason: null });
         }
-        const turn = await advise(env.AI, env.AI_MODEL, history);
+        const turn = await advise(brain(env), env.AI_MODEL, history);
         let recToken: string | null = null;
         let agentOrder: { id: string; plan: string; tool: string } | null = null;
         let guards: Guard[] = [];
@@ -220,7 +241,7 @@ export default {
           // The checkout agent may call create_paypal_order. The price comes from the catalog,
           // and the person still approves the payment in PayPal.
           try {
-            const call = await checkoutAgentCall(env.AI, env.AI_MODEL, history, turn.plan);
+            const call = await checkoutAgentCall(brain(env), env.AI_MODEL, history, turn.plan);
             guards = chatGuards(call);
             const agentPlan = planOrNull(call.plan);
             if (agentPlan) {
@@ -249,7 +270,7 @@ export default {
         const question = cleanQuestion(body.question);
         if (!question) return json({ error: 'empty question' }, 400);
         try {
-          const { args, view } = await askGrid(env.AI, env.AI_MODEL, question);
+          const { args, view } = await askGrid(brain(env), env.AI_MODEL, question);
           if (!view) return json({ error: 'no view' }, 502);
           return json({ question, toolCall: JSON.stringify(args).slice(0, 300), view });
         } catch {
@@ -257,7 +278,7 @@ export default {
         }
       }
 
-      // "Ask PayPal": Llama 3.3 picks one read-only tool from the official PayPal Agent Toolkit.
+      // "Ask PayPal": Claude (Llama 3.3 as fallback) picks one read-only tool from the official PayPal Agent Toolkit.
       if (request.method === 'POST' && pathname === '/api/ask-paypal') {
         const body = (await request.json().catch(() => ({}))) as { question?: unknown };
         const question = cleanAsk(body.question);
@@ -271,7 +292,7 @@ export default {
         ].slice(0, 8).join('\n');
         try {
           const toolkit = makeToolkit(env.PAYPAL_CLIENT_ID, env.PAYPAL_CLIENT_SECRET, env.PAYPAL_ENV !== 'live');
-          const out = await askPayPal(env.AI, env.AI_MODEL, toolkit, question, known);
+          const out = await askPayPal(brain(env), env.AI_MODEL, toolkit, question, known);
           return json({ question, tool: out.tool, args: out.args, answer: out.answer, result: JSON.stringify(out.result ?? null).slice(0, 4000) });
         } catch {
           return json({ error: 'model or PayPal unavailable' }, 503);
@@ -281,7 +302,7 @@ export default {
       if (request.method === 'POST' && pathname === '/api/guard-test') {
         let injection: Guard;
         try {
-          const call = await checkoutAgentCall(env.AI, env.AI_MODEL, [{ role: 'user', content: INJECTION }], 'ladder_1m');
+          const call = await checkoutAgentCall(brain(env), env.AI_MODEL, [{ role: 'user', content: INJECTION }], 'ladder_1m');
           injection = injectionGuard(call);
         } catch {
           injection = { id: 'injection', ok: true, text: 'Model did not answer; the server created no order' };
@@ -341,7 +362,7 @@ export default {
         let step = '';
         if (ladder) {
           try {
-            step = await firstStep(env.AI, env.AI_MODEL, ladder);
+            step = await firstStep(brain(env), env.AI_MODEL, ladder);
           } catch {
             step = '';
           }
@@ -368,7 +389,7 @@ export default {
         const history = sanitize(body.messages);
         if (!history.some((m) => m.role === 'user')) return json({ error: 'empty' }, 400);
         if (history.some((m) => m.role === 'user' && isCrisis(m.content))) return json({ stage: 'help', reply: HELP_TEXT });
-        const call = await giftAgent(env.AI, env.AI_MODEL, history);
+        const call = await giftAgent(brain(env), env.AI_MODEL, history);
         if (!call) return json({ stage: 'ask', reply: 'How many people is the gift for, and should it be 1 month or 3 months?' });
         if (call.kind === 'ask') return json({ stage: 'ask', reply: call.question });
         const plan = planOrNull(call.plan);
@@ -526,7 +547,7 @@ export default {
         if (!plan) return json({ error: 'unknown plan' }, 400);
         let args: Record<string, unknown> | null = null;
         try {
-          args = await askPlan(env.AI, env.AI_MODEL, ladder, plan.days);
+          args = await askPlan(brain(env), env.AI_MODEL, ladder, plan.days);
         } catch {
           args = null; // an even split still gives a full plan
         }

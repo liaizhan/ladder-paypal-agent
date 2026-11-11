@@ -70,7 +70,7 @@ export function renderDashboard(): string {
   <div class="kpis" id="kpis"></div>
 
   <h2>Ask PayPal</h2>
-  <p class="sub">Questions about your PayPal records in plain words. Llama 3.3 picks one tool from the official <a href="https://github.com/paypal/paypal-agent-toolkit" target="_blank" rel="noopener">PayPal Agent Toolkit</a>, the toolkit calls PayPal, and the AI explains the answer. Read-only: the toolkit is built with get and list actions only, so nothing can be paid, refunded or sent from here. Personal fields and payer links are hidden before the AI or this page sees them.</p>
+  <p class="sub">Questions about your PayPal records in plain words. Claude Sonnet 5.5 picks one tool from the official <a href="https://github.com/paypal/paypal-agent-toolkit" target="_blank" rel="noopener">PayPal Agent Toolkit</a>, the toolkit calls PayPal, and the AI explains the answer. Read-only: the toolkit is built with get and list actions only, so nothing can be paid, refunded or sent from here. Personal fields and payer links are hidden before the AI or this page sees them.</p>
   <form class="ask" id="pp-form">
     <input id="pp-q" type="text" maxlength="200" placeholder="For example: what is the status of my latest order?" aria-label="Ask PayPal a question">
     <button type="submit" id="pp-btn">Ask PayPal</button>
@@ -123,7 +123,7 @@ export function renderDashboard(): string {
   <div class="kpis" id="gift-kpis"></div>
   <div id="gifts" class="grid ag-theme-quartz"></div>
 
-  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2, JavaScript SDK, Invoicing v2 and PayPal Agent Toolkit. AI: Workers AI, Llama 3.3 70B.</footer>
+  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2, JavaScript SDK, Invoicing v2 and PayPal Agent Toolkit. AI: Claude Sonnet 5.5, with Llama 3.3 70B on Workers AI as fallback.</footer>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js" integrity="sha384-OEiOpwgvTUxOUC72SwfU8zDqZrWBwr0YNPNhovPbjCxdaTD0cLxMHBew/o8zuRln" crossorigin="anonymous"></script>
 <script>

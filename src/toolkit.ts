@@ -1,4 +1,4 @@
-// "Ask PayPal": the owner asks a question in plain words, Llama 3.3 picks one tool from the
+// "Ask PayPal": the owner asks a question in plain words, Claude (Llama 3.3 as fallback) picks one tool from the
 // official PayPal Agent Toolkit, and the toolkit calls PayPal. The toolkit is built with
 // read-only actions only (orders.get, invoices.list/get, disputes.list),
 // so the model cannot create, capture, refund or send anything. The server checks the tool
