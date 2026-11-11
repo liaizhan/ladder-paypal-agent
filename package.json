@@ -12,5 +12,8 @@
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "@paypal/paypal-server-sdk": "^2.5.0"
   }
 }

@@ -71,9 +71,9 @@ test('check_ladder_order validates the id; unknown methods and tools get errors'
 
 test('orders for MCP carry return and cancel urls; page orders do not', () => {
   const withReturn: any = buildOrder(PLANS.ladder_1m, null, { returnUrl: 'https://x.dev/return', cancelUrl: 'https://x.dev/' });
-  assert.equal(withReturn.payment_source.paypal.experience_context.return_url, 'https://x.dev/return');
+  assert.equal(withReturn.paymentSource.paypal.experienceContext.returnUrl, 'https://x.dev/return');
   const page: any = buildOrder(PLANS.ladder_1m, null);
-  assert.equal(page.payment_source.paypal.experience_context.return_url, undefined);
+  assert.equal(page.paymentSource.paypal.experienceContext.returnUrl, undefined);
   assert.equal(approvalLink([{ rel: 'self', href: 'a' }, { rel: 'payer-action', href: 'b' }]), 'b');
   assert.equal(approvalLink([{ rel: 'approve', href: 'c' }]), 'c');
   assert.equal(approvalLink(null), '');

@@ -52,8 +52,8 @@ test('agent: sanitize drops system messages and trims history', () => {
 
 test('paypal: order amount comes from the catalog', () => {
   const order = buildOrder(PLANS.ladder_3m, { me: 'm', obstacles: [], goal: 'Open a bakery' });
-  assert.equal(order.purchase_units[0].amount.value, '78.00');
-  assert.equal(order.purchase_units[0].reference_id, 'ladder_3m');
+  assert.equal(order.purchaseUnits[0].amount.value, '78.00');
+  assert.equal(order.purchaseUnits[0].referenceId, 'ladder_3m');
   assert.ok(itemDescription(PLANS.ladder_1m, { me: '', obstacles: [], goal: 'x'.repeat(300) }).length <= 127);
 });
 

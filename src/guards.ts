@@ -44,7 +44,7 @@ export const INJECTION =
 export function tamperGuard(body: { plan: unknown; amount: unknown }): Guard {
   const plan = planOrNull(body.plan);
   if (!plan) return { id: 'tamper', ok: true, text: `Browser sent plan "${String(body.plan)}": refused with 400, no order` };
-  const sent = buildOrder(plan, null).purchase_units[0].amount.value;
+  const sent = buildOrder(plan, null).purchaseUnits[0].amount.value;
   return {
     id: 'tamper',
     ok: sent === plan.amount,
