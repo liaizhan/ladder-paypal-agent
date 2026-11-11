@@ -51,7 +51,7 @@ export function renderDashboard(): string {
   <div class="banner">PayPal <b>sandbox</b>: no real money moves. Includes test runs by the author.</div>
   <h1>Payments dashboard</h1>
   <p class="sub">Every PayPal order the Ladder AI advisor led to: what the AI recommended, what the person chose, and what PayPal says now. Open orders are reconciled with PayPal Orders v2 each time this page loads, and verified PayPal webhooks update orders, captures and refunds as they happen.</p>
-  <p class="note">Privacy: no goals, obstacles, names or emails are stored. Only plan ids, the number of steps, the language, PayPal ids and statuses. Ids of unpaid orders are masked. <a href="/">Back to the advisor</a></p>
+  <p class="note">Privacy: no goals, obstacles, names or emails are stored. Only plan ids, the number of steps, the language, PayPal ids and statuses. Ids of unpaid orders and invoices are masked. <a href="/">Back to the advisor</a></p>
 
   <div class="kpis" id="kpis"></div>
 
@@ -78,7 +78,12 @@ export function renderDashboard(): string {
   <p class="sub">Conversations, AI recommendations and safety handoffs, next to PayPal orders and captures. A safety handoff means the advisor showed help lines instead of a checkout.</p>
   <div id="days" class="grid ag-theme-quartz"></div>
 
-  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2 and JavaScript SDK. AI: Workers AI, Llama 3.3 70B.</footer>
+  <h2>Team gifts (PayPal Invoicing)</h2>
+  <p class="sub">Companies and unions that give Ladder to their own people. The gift agent prepares a draft PayPal invoice, HR sends it, and after payment the server issues one access code per seat. Unpaid invoices are checked with PayPal Invoicing each time this page loads, and verified INVOICING webhooks update them. <a href="/gift">Open the gift page</a></p>
+  <div class="kpis" id="gift-kpis"></div>
+  <div id="gifts" class="grid ag-theme-quartz"></div>
+
+  <footer>Ladder method by Aizhan Li, author of the Ladder method. Grids: AG Grid Community. Payments: PayPal Orders v2, JavaScript SDK and Invoicing v2. AI: Workers AI, Llama 3.3 70B.</footer>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@32.3.3/dist/ag-grid-community.min.js" integrity="sha384-OEiOpwgvTUxOUC72SwfU8zDqZrWBwr0YNPNhovPbjCxdaTD0cLxMHBew/o8zuRln" crossorigin="anonymous"></script>
 <script>
@@ -176,6 +181,52 @@ const daysGrid = agGrid.createGrid($('days'), {
   ],
 });
 
+const GIFT_TEXT = { DRAFT: 'Draft', SENT: 'Sent', UNPAID: 'Sent, unpaid', PAID: 'Paid, codes issued', CANCELLED: 'Cancelled', PARTIALLY_PAID: 'Partly paid', MARKED_AS_PAID: 'Marked as paid' };
+const giftClass = (s) => s === 'PAID' ? 'ok' : s === 'CANCELLED' ? 'bad' : s === 'UNPAID' || s === 'SENT' ? 'warn' : 'open';
+const giftsGrid = agGrid.createGrid($('gifts'), {
+  domLayout: 'autoHeight',
+  rowData: [],
+  overlayNoRowsTemplate: 'No team gifts yet. Open the gift page and describe a gift.',
+  defaultColDef: { sortable: true, resizable: true, filter: true, minWidth: 110 },
+  autoSizeStrategy: { type: 'fitGridWidth' },
+  columnDefs: [
+    { field: 'createdAt', headerName: 'Created', sort: 'desc', minWidth: 140, valueFormatter: (p) => p.node.rowPinned ? 'Total' : when(p.value) },
+    { field: 'status', headerName: 'Invoice status', minWidth: 170,
+      cellRenderer: (p) => p.node.rowPinned ? p.value : pill(GIFT_TEXT[p.value] || p.value, giftClass(p.value)),
+      filterValueGetter: (p) => GIFT_TEXT[p.data.status] || p.data.status },
+    { field: 'plan', headerName: 'Plan', valueFormatter: (p) => p.node.rowPinned ? '' : PLAN[p.value] || p.value },
+    { field: 'seats', headerName: 'Seats', type: 'rightAligned', filter: 'agNumberColumnFilter' },
+    { field: 'unit', headerName: 'Per seat', type: 'rightAligned', valueFormatter: (p) => p.node.rowPinned ? '' : money(p.value) },
+    { field: 'total', headerName: 'Invoice total', type: 'rightAligned', filter: 'agNumberColumnFilter', valueGetter: (p) => Number(p.data.total), valueFormatter: (p) => money(p.value) },
+    { field: 'codes', headerName: 'Codes issued', type: 'rightAligned' },
+    { field: 'invoiceNumber', headerName: 'Invoice no.', cellClass: 'mono' },
+    { field: 'invoiceId', headerName: 'PayPal invoice', cellClass: 'mono', minWidth: 190 },
+    { field: 'webhooks', headerName: 'PayPal webhooks', cellClass: 'mono', minWidth: 190,
+      valueGetter: (p) => p.node.rowPinned ? p.data.webhooks : (p.data.webhooks ? p.data.webhooks + ', last ' + (p.data.lastEvent || '') : '') },
+  ],
+});
+
+function showGifts(gifts) {
+  const paid = gifts.filter((g) => g.status === 'PAID');
+  const seats = paid.reduce((s, g) => s + g.seats, 0);
+  const revenue = paid.reduce((s, g) => s + Number(g.total), 0);
+  const codes = paid.reduce((s, g) => s + (g.codes || 0), 0);
+  giftsGrid.setGridOption('rowData', gifts);
+  giftsGrid.setGridOption('pinnedBottomRowData', gifts.length ? [{ createdAt: '', status: gifts.length + (gifts.length === 1 ? ' invoice' : ' invoices'), plan: '', seats: gifts.reduce((s, g) => s + g.seats, 0), unit: '', total: revenue, codes, invoiceNumber: '', invoiceId: paid.length + ' paid', webhooks: '' }] : []);
+  const items = [
+    [gifts.length, 'Gift invoices prepared by the AI agent'],
+    [paid.length, 'Paid in PayPal' + (gifts.length ? ', ' + Math.round(100 * paid.length / gifts.length) + '%' : '')],
+    [seats, 'Seats paid, ' + codes + ' access codes issued'],
+    [money(revenue), 'Gift revenue (sandbox)'],
+  ];
+  $('gift-kpis').replaceChildren(...items.map(([v, l]) => {
+    const d = document.createElement('div'); d.className = 'kpi';
+    const a = document.createElement('div'); a.className = 'v'; a.textContent = v;
+    const b = document.createElement('div'); b.className = 'l'; b.textContent = l;
+    d.append(a, b); return d;
+  }));
+}
+
 function shown() {
   const rows = [];
   ordersGrid.forEachNodeAfterFilter((n) => { if (n.data) rows.push(n.data); });
@@ -249,6 +300,7 @@ async function load() {
     const { rows, total } = buildDays(allDays, allOrders);
     daysGrid.setGridOption('rowData', rows);
     daysGrid.setGridOption('pinnedBottomRowData', rows.length ? [total] : []);
+    showGifts(data.gifts || []);
     $('sync').textContent = 'Updated ' + when(data.generatedAt) + '. ' + (data.reconciled ? data.reconciled + ' open order(s) checked with PayPal Orders v2 just now.' : 'No open orders needed a PayPal check.');
   } catch (e) {
     $('sync').textContent = 'Could not load the dashboard. Please try again.';

@@ -1,11 +1,33 @@
-import { advise, checkoutAgent, firstStep, sanitize, type AiBinding, type Ladder } from './agent.ts';
-import { PLANS, planOrNull } from './catalog.ts';
-import { captureOrder, createOrder, eventToUpdate, getCapture, getOrderStatuses, refundCapture, verifyWebhook, webhookHeaders } from './paypal.ts';
-import { expiryFrom, signPass, signRecommendation, verifyPass, verifyRecommendation } from './pass.ts';
+import { advise, checkoutAgent, firstStep, giftAgent, sanitize, type AiBinding, type Ladder } from './agent.ts';
+import { giftTotal, MAX_SEATS, MIN_SEATS, PLANS, planOrNull } from './catalog.ts';
+import {
+  captureOrder,
+  createGiftInvoice,
+  createOrder,
+  eventToUpdate,
+  getCapture,
+  getInvoice,
+  getOrderStatuses,
+  INVOICE_ID,
+  invoiceEventId,
+  refundCapture,
+  sendInvoice,
+  verifyWebhook,
+  webhookHeaders,
+} from './paypal.ts';
+import { expiryFrom, signGift, signPass, signRecommendation, verifyGift, verifyPass, verifyRecommendation } from './pass.ts';
 import {
   applyWebhook,
   countChat,
   detectLang,
+  getGift,
+  issueGiftCodes,
+  listGifts,
+  publicGift,
+  redeemGiftCode,
+  saveGift,
+  updateGift,
+  type GiftRecord,
   linkCapture,
   orderIdForCapture,
   isFinal,
@@ -21,6 +43,7 @@ import {
 import { renderDashboard } from './dashboard.ts';
 import { HELP_TEXT, isCrisis } from './safety.ts';
 import { renderPage } from './page.ts';
+import { renderGift } from './gift.ts';
 
 export interface Env {
   AI: AiBinding;
@@ -60,6 +83,25 @@ function cleanLadder(raw: unknown): Ladder | null {
   };
 }
 
+/** Asks PayPal for the invoice. Codes are issued only for PAID with the full catalog total,
+ *  the same plan and the same seat count the server put on the invoice. */
+async function settleGift(env: Env, kv: KVNamespace, rec: GiftRecord, eventType?: string): Promise<{ rec: GiftRecord; codes: string[] }> {
+  const inv = await getInvoice(env, rec.invoiceId);
+  if (!inv) return { rec, codes: [] };
+  const plan = planOrNull(rec.plan);
+  const fullyPaid =
+    inv.status === 'PAID' && !!plan && inv.planId === rec.plan && inv.seats === rec.seats && inv.total === giftTotal(plan, rec.seats) && inv.paid === inv.total;
+  const patch: Partial<GiftRecord> = { status: inv.status };
+  if (eventType) {
+    patch.webhooks = (rec.webhooks ?? 0) + 1;
+    patch.lastEvent = eventType;
+  }
+  const next = (await updateGift(kv, rec.invoiceId, patch)) ?? { ...rec, ...patch };
+  if (!fullyPaid) return { rec: next, codes: [] };
+  const codes = await issueGiftCodes(kv, env.PASS_SECRET, next);
+  return { rec: { ...next, codes: codes.length }, codes };
+}
+
 async function readJson(request: Request): Promise<Record<string, unknown>> {
   try {
     return (await request.json()) as Record<string, unknown>;
@@ -75,6 +117,12 @@ export default {
 
     if (request.method === 'GET' && pathname === '/') {
       return new Response(renderPage({ clientId: env.PAYPAL_CLIENT_ID, plans: Object.values(PLANS), env: env.PAYPAL_ENV }), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    if (request.method === 'GET' && pathname === '/gift') {
+      return new Response(renderGift({ env: env.PAYPAL_ENV, plans: Object.values(PLANS), maxSeats: MAX_SEATS }), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
     }
@@ -185,10 +233,107 @@ export default {
         });
       }
 
+      // Team gift: the gift agent prepares a DRAFT PayPal invoice through a tool call.
+      // The server checks the seat count and sets the price; nothing is sent yet.
+      if (request.method === 'POST' && pathname === '/api/gift/draft') {
+        const kv = env.LADDER_ORDERS;
+        if (!kv) return json({ error: 'gifts need storage' }, 503);
+        const body = await readJson(request);
+        const history = sanitize(body.messages);
+        if (!history.some((m) => m.role === 'user')) return json({ error: 'empty' }, 400);
+        if (history.some((m) => m.role === 'user' && isCrisis(m.content))) return json({ stage: 'help', reply: HELP_TEXT });
+        const call = await giftAgent(env.AI, env.AI_MODEL, history);
+        if (!call) return json({ stage: 'ask', reply: 'How many people is the gift for, and should it be 1 month or 3 months?' });
+        if (call.kind === 'ask') return json({ stage: 'ask', reply: call.question });
+        const plan = planOrNull(call.plan);
+        if (!plan) return json({ stage: 'ask', reply: 'Should it be 1 month or 3 months?' });
+        const tool = `create_gift_invoice(plan_id="${call.plan}", seats=${JSON.stringify(call.requested ?? null)})`;
+        if (call.seats === null) {
+          return json({ stage: 'refused', tool, reply: `One invoice covers ${MIN_SEATS} to ${MAX_SEATS} seats. The server did not create it. Please give a number in that range.` });
+        }
+        const inv = await createGiftInvoice(env, { plan, seats: call.seats, note: call.note, company: call.company });
+        const now = new Date().toISOString();
+        const rec: GiftRecord = {
+          invoiceId: inv.id,
+          invoiceNumber: inv.number,
+          createdAt: now,
+          updatedAt: now,
+          plan: plan.id,
+          seats: call.seats,
+          unit: plan.amount,
+          total: inv.total,
+          status: inv.status || 'DRAFT',
+          codes: 0,
+          webhooks: 0,
+        };
+        await saveGift(kv, rec);
+        return json({
+          stage: 'draft',
+          tool,
+          invoiceId: inv.id,
+          number: inv.number,
+          plan: plan.id,
+          planName: plan.name,
+          seats: call.seats,
+          unit: plan.amount,
+          total: inv.total,
+          note: call.note,
+          company: call.company,
+          token: await signGift(env.PASS_SECRET, inv.id),
+        });
+      }
+
+      const giftSend = pathname.match(/^\/api\/gift\/(INV2[A-Z0-9-]+)\/send$/);
+      if (request.method === 'POST' && giftSend) {
+        const kv = env.LADDER_ORDERS;
+        const id = giftSend[1];
+        if (!kv || !INVOICE_ID.test(id)) return json({ error: 'not found' }, 404);
+        const body = await readJson(request);
+        if (!(await verifyGift(env.PASS_SECRET, body.token, id))) return json({ error: 'invalid token' }, 401);
+        const rec = await getGift(kv, id);
+        if (!rec) return json({ error: 'not found' }, 404);
+        if (rec.payerUrl) return json({ payerUrl: rec.payerUrl, status: rec.status });
+        const payerUrl = await sendInvoice(env, id);
+        await updateGift(kv, id, { payerUrl, status: 'UNPAID' });
+        return json({ payerUrl, status: 'UNPAID' });
+      }
+
+      const giftGet = pathname.match(/^\/api\/gift\/(INV2[A-Z0-9-]+)$/);
+      if (request.method === 'GET' && giftGet) {
+        const kv = env.LADDER_ORDERS;
+        const id = giftGet[1];
+        if (!kv || !INVOICE_ID.test(id)) return json({ error: 'not found' }, 404);
+        if (!(await verifyGift(env.PASS_SECRET, url.searchParams.get('token'), id))) return json({ error: 'invalid token' }, 401);
+        const rec = await getGift(kv, id);
+        if (!rec) return json({ error: 'not found' }, 404);
+        const settled = await settleGift(env, kv, rec);
+        return json({ status: settled.rec.status, seats: rec.seats, total: rec.total, payerUrl: rec.payerUrl ?? '', codes: settled.codes });
+      }
+
+      if (request.method === 'POST' && pathname === '/api/gift/redeem') {
+        const kv = env.LADDER_ORDERS;
+        if (!kv) return json({ error: 'gifts need storage' }, 503);
+        const body = await readJson(request);
+        const seat = await redeemGiftCode(kv, String(body.code ?? ''));
+        if (!seat) return json({ error: 'This code is not valid or was already used.' }, 404);
+        const plan = PLANS[seat.plan];
+        const expires = expiryFrom(new Date(), plan.days);
+        const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: '', expires, invoiceId: seat.invoiceId });
+        return json({ plan: plan.id, planName: plan.name, expires, pass });
+      }
+
       if (request.method === 'GET' && pathname === '/api/dashboard') {
         const kv = env.LADDER_ORDERS;
-        if (!kv) return json({ orders: [], days: [], reconciled: 0 });
-        const [orders, days] = await Promise.all([listOrders(kv), listDays(kv)]);
+        if (!kv) return json({ orders: [], days: [], gifts: [], reconciled: 0 });
+        const [orders, days, gifts] = await Promise.all([listOrders(kv), listDays(kv), listGifts(kv)]);
+        // Sent gift invoices still unpaid after 2 minutes are checked with PayPal Invoicing (at most 5).
+        const staleGifts = gifts.filter((g) => g.status === 'UNPAID' && Date.now() - Date.parse(g.updatedAt) > 120_000).slice(0, 5);
+        if (staleGifts.length) {
+          const giftWork = Promise.all(staleGifts.map((g) => settleGift(env, kv, g).catch(() => ({ rec: g, codes: [] }))));
+          background(ctx, giftWork);
+          const done = await Promise.race([giftWork, new Promise<null>((r) => setTimeout(() => r(null), 4000))]);
+          if (done) for (const d of done) Object.assign(gifts.find((g) => g.invoiceId === d.rec.invoiceId) ?? {}, d.rec);
+        }
         // Reconcile unfinished orders older than 2 minutes with PayPal Orders v2 (at most 10 per load).
         const stale = orders
           .filter((o) => !isFinal(o.status) && Date.now() - Date.parse(o.updatedAt) > 120_000)
@@ -218,7 +363,7 @@ export default {
             }
           }
         }
-        return json({ orders: orders.map(publicOrder), days, reconciled, generatedAt: new Date().toISOString() });
+        return json({ orders: orders.map(publicOrder), days, gifts: gifts.map(publicGift), reconciled, generatedAt: new Date().toISOString() });
       }
 
       if (request.method === 'GET' && pathname === '/api/pass') {
@@ -235,6 +380,7 @@ export default {
         const body = await readJson(request);
         const pass = await verifyPass(env.PASS_SECRET, String(body.pass ?? ''));
         if (!pass) return json({ error: 'invalid pass' }, 401);
+        if (pass.invoiceId) return json({ error: 'This seat was a gift. Refunds go to the company that paid the invoice.' }, 409);
         const kv = env.LADDER_ORDERS;
         if (kv) {
           const done = await kv.getWithMetadata(`refund:${pass.captureId}`);
@@ -267,6 +413,28 @@ export default {
         }
         const h = webhookHeaders(request.headers);
         if (!h || !(await verifyWebhook(env, h, event))) return json({ error: 'signature not verified' }, 401);
+        const eventType = String(event.event_type ?? '');
+        if (eventType.startsWith('INVOICING.INVOICE.')) {
+          const kv = env.LADDER_ORDERS;
+          const id = invoiceEventId(event);
+          let giftResult = 'ignored';
+          if (kv && id) {
+            const seenKey = `wh:${String(event.id ?? '')}`;
+            if ((await kv.getWithMetadata(seenKey)).value !== null) giftResult = 'duplicate';
+            else {
+              await kv.put(seenKey, eventType, { expirationTtl: 60 * 60 * 24 * 30 });
+              const rec = await getGift(kv, id);
+              if (!rec) giftResult = 'unknown-invoice';
+              else {
+                // The event says what happened; PayPal Invoicing is asked again for the amounts.
+                const settled = await settleGift(env, kv, rec, eventType);
+                giftResult = settled.codes.length ? `codes:${settled.codes.length}` : `status:${settled.rec.status}`;
+              }
+            }
+          }
+          console.log(JSON.stringify({ event: 'paypal_webhook', type: eventType, result: giftResult }));
+          return json({ ok: true, result: giftResult });
+        }
         const update = eventToUpdate(event);
         let result = 'ignored';
         if (update && env.LADDER_ORDERS) {

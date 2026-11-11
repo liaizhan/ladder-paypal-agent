@@ -1,7 +1,7 @@
 // PayPal Orders v2, server side. Sandbox by default.
 // The order is built from the server catalog; capture re-checks the amount.
 
-import type { Plan } from './catalog.ts';
+import { giftTotal, type Plan } from './catalog.ts';
 import type { Ladder } from './agent.ts';
 
 export interface PayPalEnv {
@@ -14,14 +14,18 @@ export function apiBase(env: PayPalEnv): string {
   return env.PAYPAL_ENV === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
 }
 
-async function accessToken(env: PayPalEnv): Promise<string> {
+// The default client-credentials token has no invoicing scope even when Invoicing is
+// enabled for the app; invoice calls ask for it explicitly and get a token with only that scope.
+const INVOICING_SCOPE = 'https://uri.paypal.com/services/invoicing';
+
+async function accessToken(env: PayPalEnv, scope?: string): Promise<string> {
   const res = await fetch(`${apiBase(env)}/v1/oauth2/token`, {
     method: 'POST',
     headers: {
       Authorization: 'Basic ' + btoa(`${env.PAYPAL_CLIENT_ID}:${env.PAYPAL_CLIENT_SECRET}`),
       'Content-Type': 'application/x-www-form-urlencoded',
     },
-    body: 'grant_type=client_credentials',
+    body: 'grant_type=client_credentials' + (scope ? '&scope=' + encodeURIComponent(scope) : ''),
   });
   if (!res.ok) throw new Error(`paypal token ${res.status}`);
   const data = (await res.json()) as { access_token: string };
@@ -256,4 +260,116 @@ export function eventToUpdate(event: any): WebhookUpdate | null {
     default:
       return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Team gifts with PayPal Invoicing v2. The invoice is created as a DRAFT, the
+// HR person reads it and presses Send, and PayPal returns the payer link.
+// Access codes are issued only when PayPal says the invoice is PAID in full.
+
+export const INVOICE_ID = /^INV2(-[A-Z0-9]{4}){4}$/;
+
+export interface GiftDraft {
+  plan: Plan;
+  seats: number;
+  note: string; // written by the AI, checked by the server
+  company: string;
+}
+
+export function buildGiftInvoice(g: GiftDraft) {
+  const team = g.company ? ` for the team at ${g.company}` : ' for your team';
+  return {
+    detail: {
+      currency_code: 'USD',
+      reference: `gift:${g.plan.id}`,
+      note: g.note.slice(0, 1000),
+      terms_and_conditions:
+        'Each seat is one access code to the Ladder video practices for the plan period. Codes are issued after the invoice is paid in full. Sandbox demo: no real money moves.',
+      payment_term: { term_type: 'DUE_ON_RECEIPT' },
+    },
+    invoicer: { business_name: 'Ladder by Aizhan Li' },
+    items: [
+      {
+        name: `${g.plan.name}, gift seat`,
+        description: `${g.plan.note}. One access code per seat${team}.`.slice(0, 1000),
+        quantity: String(g.seats),
+        unit_amount: { currency_code: 'USD', value: g.plan.amount },
+        unit_of_measure: 'QUANTITY',
+      },
+    ],
+    configuration: { allow_tip: false, tax_inclusive: false, partial_payment: { allow_partial_payment: false } },
+  };
+}
+
+async function invoiceFetch(env: PayPalEnv, path: string, init: RequestInit = {}): Promise<Response> {
+  const token = await accessToken(env, INVOICING_SCOPE);
+  return fetch(`${apiBase(env)}/v2/invoicing/invoices${path}`, {
+    ...init,
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(init.headers ?? {}) },
+  });
+}
+
+export interface InvoiceInfo {
+  id: string;
+  number: string;
+  status: string; // DRAFT, SENT, UNPAID, PAID, CANCELLED, PARTIALLY_PAID, MARKED_AS_PAID, ...
+  total: string;
+  paid: string;
+  planId: string;
+  seats: number;
+}
+
+export function readInvoice(d: any): InvoiceInfo {
+  const ref = String(d?.detail?.reference ?? '');
+  return {
+    id: String(d?.id ?? ''),
+    number: String(d?.detail?.invoice_number ?? ''),
+    status: String(d?.status ?? ''),
+    total: String(d?.amount?.value ?? ''),
+    paid: String(d?.payments?.paid_amount?.value ?? ''),
+    planId: ref.startsWith('gift:') ? ref.slice(5) : '',
+    seats: Number(d?.items?.[0]?.quantity) || 0,
+  };
+}
+
+export async function createGiftInvoice(env: PayPalEnv, g: GiftDraft): Promise<InvoiceInfo> {
+  const res = await invoiceFetch(env, '', {
+    method: 'POST',
+    headers: { Prefer: 'return=representation', 'PayPal-Request-Id': crypto.randomUUID() },
+    body: JSON.stringify(buildGiftInvoice(g)),
+  });
+  const d = (await res.json()) as any;
+  if (!res.ok || !d?.id) throw new Error(`paypal invoice create ${res.status} ${d?.details?.[0]?.issue ?? d?.message ?? ''}`);
+  const info = readInvoice(d);
+  if (info.total !== giftTotal(g.plan, g.seats)) throw new Error('invoice total mismatch');
+  return info;
+}
+
+/** Sends the draft without PayPal email (there is no recipient) and returns the payer link. */
+export async function sendInvoice(env: PayPalEnv, id: string): Promise<string> {
+  if (!INVOICE_ID.test(id)) throw new Error('bad invoice id');
+  const res = await invoiceFetch(env, `/${id}/send`, {
+    method: 'POST',
+    headers: { 'PayPal-Request-Id': `ladder-send-${id}` },
+    body: JSON.stringify({ send_to_recipient: false, send_to_invoicer: false }),
+  });
+  const d = (await res.json().catch(() => ({}))) as any;
+  if (!res.ok) throw new Error(`paypal invoice send ${res.status} ${d?.details?.[0]?.issue ?? d?.message ?? ''}`);
+  const href = String(d?.href ?? (d?.links ?? []).find((l: any) => l.rel === 'payer-view')?.href ?? '');
+  return href.startsWith('https://www.sandbox.paypal.com/') || href.startsWith('https://www.paypal.com/') ? href : '';
+}
+
+export async function getInvoice(env: PayPalEnv, id: string): Promise<InvoiceInfo | null> {
+  if (!INVOICE_ID.test(id)) return null;
+  const res = await invoiceFetch(env, `/${id}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`paypal invoice get ${res.status}`);
+  return readInvoice(await res.json());
+}
+
+/** Invoice id from an INVOICING.INVOICE.* webhook (resource is the invoice, or wraps it). */
+export function invoiceEventId(event: any): string {
+  const r = event?.resource ?? {};
+  const id = String(r?.invoice?.id ?? r?.id ?? '');
+  return INVOICE_ID.test(id) ? id : '';
 }

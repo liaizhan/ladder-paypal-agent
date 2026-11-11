@@ -97,7 +97,7 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <p class="fine" id="refund-status" aria-live="polite"></p>
   </section>
 
-  <footer>Ladder method by Aizhan Li, author of the Ladder method. Live product: <a href="https://108psy.com">108psy.com</a>. The advisor is not a doctor or a therapist and does not diagnose. <a href="/dashboard">Payments dashboard</a></footer>
+  <footer>Ladder method by Aizhan Li, author of the Ladder method. Live product: <a href="https://108psy.com">108psy.com</a>. The advisor is not a doctor or a therapist and does not diagnose. <a href="/dashboard">Payments dashboard</a>. <a href="/gift">Team gift for companies</a></footer>
 </div>
 <script>
 const CONFIG = ${config};

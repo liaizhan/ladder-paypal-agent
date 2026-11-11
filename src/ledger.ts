@@ -226,3 +226,112 @@ export function publicOrder(rec: OrderRecord): OrderRecord & { followedAdvice: b
     followedAdvice: rec.recommended ? rec.recommended === rec.chosen : null,
   };
 }
+
+// Team gifts: a company pays one PayPal invoice, then gets one access code per seat.
+// The record holds plan, seat count, amounts, PayPal ids and statuses only.
+
+export interface GiftRecord {
+  invoiceId: string;
+  invoiceNumber: string;
+  createdAt: string;
+  updatedAt: string;
+  plan: PlanId;
+  seats: number;
+  unit: string; // catalog price per seat
+  total: string; // seats x unit, from the server
+  status: string; // DRAFT, UNPAID, PAID, CANCELLED
+  codes: number; // access codes issued (0 until PAID)
+  payerUrl?: string; // PayPal payer view, kept private
+  webhooks: number;
+  lastEvent?: string;
+}
+
+const giftKey = (id: string) => `gift:${id}`;
+
+export async function saveGift(kv: KVNamespace, rec: GiftRecord): Promise<void> {
+  await kv.put(giftKey(rec.invoiceId), '', { metadata: rec, expirationTtl: TTL });
+}
+
+export async function getGift(kv: KVNamespace, id: string): Promise<GiftRecord | null> {
+  const { metadata } = await kv.getWithMetadata(giftKey(id));
+  return (metadata as GiftRecord | null) ?? null;
+}
+
+export async function updateGift(kv: KVNamespace, id: string, patch: Partial<GiftRecord>): Promise<GiftRecord | null> {
+  const rec = await getGift(kv, id);
+  if (!rec) return null;
+  const next = { ...rec, ...patch, updatedAt: new Date().toISOString() };
+  await saveGift(kv, next);
+  return next;
+}
+
+export async function listGifts(kv: KVNamespace, max = 200): Promise<GiftRecord[]> {
+  const out: GiftRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await kv.list({ prefix: 'gift:', limit: 1000, cursor });
+    for (const k of page.keys) if (k.metadata) out.push(k.metadata as GiftRecord);
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor && out.length < max);
+  return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, max);
+}
+
+/** Public view for the dashboard: no payer link, unpaid invoice ids masked. */
+export function publicGift(rec: GiftRecord): Omit<GiftRecord, 'payerUrl'> {
+  const { payerUrl: _hidden, ...rest } = rec;
+  return { ...rest, invoiceId: rec.status === 'PAID' ? rec.invoiceId : '...' + rec.invoiceId.slice(-4) };
+}
+
+const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+
+/** One code per seat, the same every time for the same invoice: the webhook and
+ *  the status check can both issue them without creating a second set. */
+export async function giftCodes(secret: string, invoiceId: string, seats: number): Promise<string[]> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const out: string[] = [];
+  for (let i = 0; i < seats; i++) {
+    const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`gift:${invoiceId}:${i}`)));
+    let s = '';
+    for (let j = 0; j < 8; j++) s += CODE_ALPHABET[mac[j] % CODE_ALPHABET.length];
+    out.push(`LDR-${s.slice(0, 4)}-${s.slice(4)}`);
+  }
+  return out;
+}
+
+export const GIFT_CODE = /^LDR-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/;
+
+interface CodeEntry {
+  invoiceId: string;
+  plan: PlanId;
+  used: boolean;
+}
+
+/** Writes the codes for a paid invoice. Safe to call twice: used codes stay used. */
+export async function issueGiftCodes(kv: KVNamespace, secret: string, rec: GiftRecord): Promise<string[]> {
+  const codes = await giftCodes(secret, rec.invoiceId, rec.seats);
+  for (const code of codes) {
+    const k = `giftcode:${code}`;
+    const { value } = await kv.getWithMetadata(k);
+    if (value === null) await kv.put(k, JSON.stringify({ invoiceId: rec.invoiceId, plan: rec.plan, used: false } satisfies CodeEntry), { expirationTtl: TTL });
+  }
+  if (rec.codes !== codes.length) await saveGift(kv, { ...rec, codes: codes.length, updatedAt: new Date().toISOString() });
+  return codes;
+}
+
+/** Turns one code into access once. Returns null for an unknown or used code. */
+export async function redeemGiftCode(kv: KVNamespace, code: string): Promise<{ invoiceId: string; plan: PlanId } | null> {
+  const c = String(code ?? '').trim().toUpperCase();
+  if (!GIFT_CODE.test(c)) return null;
+  const k = `giftcode:${c}`;
+  const { value } = await kv.getWithMetadata(k);
+  if (value === null) return null;
+  let entry: CodeEntry;
+  try {
+    entry = JSON.parse(value) as CodeEntry;
+  } catch {
+    return null;
+  }
+  if (entry.used || !isPlanId(entry.plan)) return null;
+  await kv.put(k, JSON.stringify({ ...entry, used: true }), { expirationTtl: TTL });
+  return { invoiceId: entry.invoiceId, plan: entry.plan };
+}

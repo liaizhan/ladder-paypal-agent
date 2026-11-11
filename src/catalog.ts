@@ -38,3 +38,20 @@ export function isPlanId(value: unknown): value is PlanId {
 export function planOrNull(value: unknown): Plan | null {
   return isPlanId(value) ? PLANS[value] : null;
 }
+
+// Team gifts: a company buys seats of one plan through a PayPal invoice.
+// The unit price is the same catalog price; the model only picks a plan id and a seat count.
+export const MIN_SEATS = 1;
+export const MAX_SEATS = 200;
+
+/** A whole number of seats in range, or null. "20", 20 and 20.0 pass; 0, 201, 2.5 and "-3" do not. */
+export function cleanSeats(value: unknown): number | null {
+  const n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
+  return typeof n === 'number' && Number.isInteger(n) && n >= MIN_SEATS && n <= MAX_SEATS ? n : null;
+}
+
+/** Seats x unit price in cents, so 3 x 39.00 is exactly "117.00". */
+export function giftTotal(plan: Plan, seats: number): string {
+  const cents = Math.round(Number(plan.amount) * 100) * seats;
+  return (cents / 100).toFixed(2);
+}

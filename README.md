@@ -4,6 +4,8 @@
 
 **Payments dashboard (AG Grid):** https://ladder-paypal-agent.liaizhan77.workers.dev/dashboard
 
+**Team gift for companies (PayPal Invoicing):** https://ladder-paypal-agent.liaizhan77.workers.dev/gift
+
 Ladder is a self-help method by Aizhan Li, author of the Ladder method. A person names where they stand now ("me"), the obstacles between them and a goal, and the goal itself. The obstacles become steps, and each step comes with short video practices. The method runs today on [108psy.com](https://108psy.com) in Russian, Kazakh and English, with a paid subscription for the video practices.
 
 This project adds an agentic checkout to Ladder:
@@ -15,6 +17,14 @@ This project adds an agentic checkout to Ladder:
 5. PayPal Checkout opens with that order. The person can switch plans, and nothing is charged without their approval in PayPal.
 6. After the capture, the server checks the amount against its own catalog, signs an access pass and the AI writes the first step for today.
 7. Within 14 days the person can get a full refund in one click. PayPal webhooks keep every order status in sync on the dashboard.
+
+A second agent serves companies and unions that give Ladder to their own people:
+
+1. HR describes the gift in plain words, for example "a New Year gift for our support team of 20, three months each".
+2. The gift agent calls `create_gift_invoice` with a plan id and a seat count, or `ask_hr` when the number of people is missing. It also writes a short gift note for the employees.
+3. The server checks the seat count (1 to 200), takes the price from its catalog and creates a draft PayPal invoice. HR reviews it and presses "Send invoice".
+4. The company pays the invoice in PayPal. When PayPal reports it as paid in full (a verified `INVOICING.INVOICE.PAID` webhook or a status check), the server issues one access code per seat.
+5. Each employee opens access with their own code, once.
 
 ## Why this matters
 
@@ -55,6 +65,21 @@ refund button ----------------> /api/refund { pass }
                                   refund capture -------------------> PayPal Payments v2
               <---------------  { refund id }, access closed
 
+gift request -----------------> /api/gift/draft
+                                  crisis check
+                                  giftAgent() ----------------------> Workers AI, tools:
+                                                                        create_gift_invoice(plan_id, seats, note)
+                                                                        ask_hr(question)
+                                  seats 1..200, price from catalog
+                                  Invoicing v2 create draft --------> PayPal sandbox
+              <---------------  { draft, total, HR token }
+send ------------------------->  /api/gift/:id/send
+                                  Invoicing v2 send ----------------> PayPal sandbox
+              <---------------  { PayPal invoice link }
+check payment / webhook ------>  GET /v2/invoicing/invoices/:id ----> PayPal sandbox
+                                  PAID in full + seats + amount check
+                                  one access code per seat
+
 PayPal webhooks --------------> /api/paypal/webhook
                                   verify signature -----------------> PayPal Notifications
                                   idempotent by event id
@@ -72,6 +97,8 @@ Design rules:
 - **No health promises.** The advisor is told it is not a doctor or a therapist and never promises results.
 - **Personal order lines.** The PayPal item description carries the plan and the person's goal, so the receipt says what they are working on.
 - **No database for access.** The access pass is signed and carries plan, expiry and the PayPal capture id.
+- **Gift codes only after full payment.** Codes are issued only when PayPal reports the invoice as PAID, the paid amount equals the invoice total and the total equals seats times the catalog price. Partial payments are switched off on the invoice. Codes are derived from the invoice id with HMAC, so a webhook and a status check arriving together issue the same set, and a used code stays used.
+- **The gift note is checked.** The note the AI writes for employees is dropped and replaced with a standard one if it mentions prices, money, doctors, therapy or cures.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
 
 ## PayPal features used
@@ -80,7 +107,8 @@ Design rules:
 - Orders v2 `GET` order details, to reconcile open orders on the dashboard.
 - PayPal JavaScript SDK Buttons in the page (`createOrder`, `onApprove`, `onError`). A declined funding source (`INSTRUMENT_DECLINED` on capture) calls `actions.restart()`, so the person can choose another one. `createOrder` reuses the order the AI agent prepared.
 - Payments v2: `GET /v2/payments/captures/:id` to check status, amount and date before a refund, and `POST /v2/payments/captures/:id/refund` with `PayPal-Request-Id`, so a double click cannot refund twice.
-- Webhooks: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED`, `PAYMENT.CAPTURE.REFUNDED`, `PAYMENT.CAPTURE.REVERSED`, each verified with `POST /v1/notifications/verify-webhook-signature`.
+- Invoicing v2: an access token with the `https://uri.paypal.com/services/invoicing` scope, `POST /v2/invoicing/invoices` (draft with one line, quantity = seats, partial payments off), `POST /v2/invoicing/invoices/:id/send` without PayPal email (HR gets the payer link) and `GET /v2/invoicing/invoices/:id` to confirm payment.
+- Webhooks: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED`, `PAYMENT.CAPTURE.REFUNDED`, `PAYMENT.CAPTURE.REVERSED`, `INVOICING.INVOICE.PAID`, `INVOICING.INVOICE.CANCELLED`, each verified with `POST /v1/notifications/verify-webhook-signature`.
 
 ## Payments dashboard (AG Grid)
 
@@ -88,6 +116,7 @@ Design rules:
 
 - **Orders grid:** created time, PayPal status, who created the order (the AI agent or the PayPal button), the plan the AI recommended, the plan the person chose, whether they followed the advice, amount, number of steps on the ladder, language, PayPal webhooks received and the last event, PayPal order id, capture id and refund id. Floating filters, quick search, status buttons (paid, open, refunded, declined or expired), pagination, a pinned total row and CSV export.
 - **KPI tiles** that recompute from the filtered rows: conversations, recommendations and the share of 3-month advice, safety handoffs, orders and how many of them the AI agent created, paid share, net revenue after refunds, how often people paid for the plan the AI recommended, refunds under the 14-day guarantee and verified webhook events.
+- **Team gifts:** every gift invoice with its PayPal status, plan, seats, price per seat, total, access codes issued and the invoicing webhooks received, plus tiles for invoices, paid share, seats paid and gift revenue. Unpaid invoices are checked with PayPal Invoicing on each load.
 - **Advisor funnel by day:** conversations, recommendations (1 month and 3 months) and safety handoffs for the last 30 days.
 - **Reconcile with PayPal:** orders that are still open after 2 minutes are checked against PayPal Orders v2 (`GET /v2/checkout/orders/:id`), so abandoned or approved orders show their real status.
 
@@ -135,7 +164,7 @@ PAYPAL_CLIENT_SECRET=your_sandbox_secret
 PASS_SECRET=any_long_random_string
 ```
 
-5. For webhooks, create a sandbox webhook in the PayPal Developer Dashboard for `https://<your worker>/api/paypal/webhook` with the five event types listed above, and put its id into `wrangler.jsonc` (`vars.PAYPAL_WEBHOOK_ID`). Without it, webhooks are rejected and everything else works.
+5. For webhooks, create a sandbox webhook in the PayPal Developer Dashboard for `https://<your worker>/api/paypal/webhook` with the seven event types listed above, and put its id into `wrangler.jsonc` (`vars.PAYPAL_WEBHOOK_ID`). Without it, webhooks are rejected and everything else works.
 6. Run locally:
 
 ```bash
@@ -150,7 +179,7 @@ npx wrangler secret put PASS_SECRET
 npm run deploy
 ```
 
-Tests (catalog, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
+Tests (catalog, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
 
 ```bash
 npm test
@@ -159,18 +188,19 @@ npm test
 ## Project layout
 
 - `src/index.ts`: routes and the capture check.
-- `src/agent.ts`: advisor prompt, output parsing, checkout agent with tool calls, first step.
-- `src/paypal.ts`: Orders v2 create and capture, Payments v2 refund, webhook verification.
+- `src/agent.ts`: advisor prompt, output parsing, checkout agent and gift agent with tool calls, first step.
+- `src/paypal.ts`: Orders v2 create and capture, Payments v2 refund, Invoicing v2, webhook verification.
 - `src/catalog.ts`: the only place with prices.
 - `src/safety.ts`: crisis check and help lines.
 - `src/pass.ts`: signed access pass and recommendation token.
 - `src/page.ts`: the page and PayPal Buttons.
 - `src/ledger.ts`: order ledger and chat counters in Workers KV.
 - `src/dashboard.ts`: the AG Grid payments dashboard.
+- `src/gift.ts`: the team gift page for companies.
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, one-click refunds, verified PayPal webhooks and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 

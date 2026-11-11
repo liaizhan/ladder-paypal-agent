@@ -7,6 +7,7 @@ export interface AccessPass {
   captureId: string;
   expires: string; // ISO date
   orderId?: string; // PayPal order, so a refund finds its ledger row
+  invoiceId?: string; // a team gift seat, paid by the company through a PayPal invoice
 }
 
 const enc = new TextEncoder();
@@ -61,6 +62,7 @@ export async function verifyPass(secret: string, token: string, now = new Date()
   if (!data || data.kind !== 'pass') return null;
   const pass: AccessPass = { plan: String(data.plan), captureId: String(data.captureId), expires: String(data.expires) };
   if (typeof data.orderId === 'string') pass.orderId = data.orderId;
+  if (typeof data.invoiceId === 'string') pass.invoiceId = data.invoiceId;
   return new Date(pass.expires) > now ? pass : null;
 }
 
@@ -80,4 +82,15 @@ export async function verifyRecommendation(secret: string, token: unknown): Prom
   const data = await verifyData(secret, String(token ?? ''));
   if (!data || data.kind !== 'rec') return null;
   return { plan: String(data.plan), steps: Number(data.steps) || 0, lang: String(data.lang) };
+}
+
+/** Proves that this browser created the gift draft, so only it can send the
+ *  invoice and see the access codes after the company pays. */
+export async function signGift(secret: string, invoiceId: string): Promise<string> {
+  return signData(secret, { kind: 'gift', invoiceId });
+}
+
+export async function verifyGift(secret: string, token: unknown, invoiceId: string): Promise<boolean> {
+  const data = await verifyData(secret, String(token ?? ''));
+  return !!data && data.kind === 'gift' && data.invoiceId === invoiceId;
 }

@@ -2,7 +2,7 @@
 // asks at most one clarifying question and then picks a plan id with a reason.
 // It never sees or writes prices: the server owns the catalog.
 
-import { isPlanId, type PlanId } from './catalog.ts';
+import { cleanSeats, isPlanId, MAX_SEATS, type PlanId } from './catalog.ts';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -236,4 +236,101 @@ export async function checkoutAgent(ai: AiBinding, model: string, history: ChatM
     temperature: 0.1,
   });
   return parseCheckoutCall(result);
+}
+
+// The gift agent. An HR person or a union describes a team gift in plain words.
+// The model may call create_gift_invoice with a plan id from an enum, a seat count
+// and a short gift note, or ask_hr with one question when something is missing.
+// It never sets a price: the server multiplies seats by the catalog price.
+
+const GIFT_PROMPT = `You are the Ladder gift agent. A company, a team lead or a trade union wants to give Ladder access to its own employees or members as a holiday gift.
+Ladder: a self-help method by Aizhan Li, author of the Ladder method. Each person maps where they stand, the obstacles and a goal, and works through the obstacles with short video practices.
+Plans: ladder_1m is 1 month, ladder_3m is 3 months (the third month is free).
+Call exactly one tool:
+- create_gift_invoice when you know the plan length and the number of people. Each person is one seat. If they did not name a length, use ladder_3m for holidays like New Year, otherwise ladder_1m.
+- ask_hr with ONE short question when the number of people is missing.
+The gift note goes to the employees inside the PayPal invoice: 2 or 3 warm sentences from the company, in the language of the request, about time for yourself and small steps toward a personal goal.
+The note must not name prices or amounts, must not promise health results or cures, and must not mention doctors or therapy.
+Seats: at most ${MAX_SEATS} in one invoice.`;
+
+export const GIFT_TOOL = {
+  type: 'function',
+  function: {
+    name: 'create_gift_invoice',
+    description: 'Prepare a DRAFT PayPal invoice for Ladder gift seats. Nothing is sent or charged: the HR person reviews the draft and sends it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        plan_id: { type: 'string', enum: ['ladder_1m', 'ladder_3m'], description: 'ladder_1m is 1 month, ladder_3m is 3 months' },
+        seats: { type: 'integer', description: `Number of people who get a code, 1 to ${MAX_SEATS}` },
+        gift_note: { type: 'string', description: 'Two or three warm sentences to the employees. No prices, no health promises.' },
+        company: { type: 'string', description: 'Company, team or union name if the person gave one, else empty' },
+      },
+      required: ['plan_id', 'seats', 'gift_note'],
+    },
+  },
+};
+
+export const ASK_HR_TOOL = {
+  type: 'function',
+  function: {
+    name: 'ask_hr',
+    description: 'Ask one short question when the number of people is missing.',
+    parameters: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] },
+  },
+};
+
+export type GiftCall =
+  | { kind: 'invoice'; plan: PlanId; seats: number | null; requested: unknown; note: string; company: string }
+  | { kind: 'ask'; question: string };
+
+// The note goes to employees: no amounts and no health claims, whatever the model wrote.
+const NOTE_BLOCK = /[$€₸₽]|\b(usd|kzt|tenge|dollars?|price|cost|cure|cures|heal|heals|healing|therapy|therapist|doctor|diagnos\w*)\b|\d+\s*(usd|kzt|\$)/i;
+
+export const DEFAULT_GIFT_NOTE =
+  'This is a gift from your team: time for yourself. Map where you stand and one goal that matters to you, and take it in small steps with short video practices.';
+
+export function cleanGiftNote(note: unknown): string {
+  const t = typeof note === 'string' ? note.replace(/\s+/g, ' ').trim().slice(0, 600) : '';
+  return t.length >= 20 && !NOTE_BLOCK.test(t) ? t : DEFAULT_GIFT_NOTE;
+}
+
+export function cleanCompany(name: unknown): string {
+  return typeof name === 'string' ? name.replace(/[^\p{L}\p{N} .,&'-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+}
+
+/** Reads the gift agent's tool call (both Workers AI shapes). seats is null when out of range. */
+export function parseGiftCall(result: unknown): GiftCall | null {
+  const r = (result ?? {}) as Record<string, any>;
+  const raw = r.tool_calls ?? r.choices?.[0]?.message?.tool_calls;
+  const calls = Array.isArray(raw) ? raw : [];
+  for (const c of calls as Array<Record<string, any>>) {
+    const name = c?.name ?? c?.function?.name;
+    let args: unknown = c?.arguments ?? c?.function?.arguments ?? {};
+    if (typeof args === 'string') {
+      try {
+        args = JSON.parse(args);
+      } catch {
+        continue;
+      }
+    }
+    const a = (args ?? {}) as Record<string, unknown>;
+    if (name === 'ask_hr' && typeof a.question === 'string' && a.question.trim()) {
+      return { kind: 'ask', question: a.question.trim().slice(0, 300) };
+    }
+    if (name === 'create_gift_invoice' && isPlanId(a.plan_id)) {
+      return { kind: 'invoice', plan: a.plan_id, seats: cleanSeats(a.seats), requested: a.seats, note: cleanGiftNote(a.gift_note), company: cleanCompany(a.company) };
+    }
+  }
+  return null;
+}
+
+export async function giftAgent(ai: AiBinding, model: string, history: ChatMessage[]): Promise<GiftCall | null> {
+  const result = await ai.run(model, {
+    messages: [{ role: 'system', content: GIFT_PROMPT }, ...history, { role: 'system', content: 'Call one tool now.' }],
+    tools: [GIFT_TOOL, ASK_HR_TOOL],
+    max_tokens: 400,
+    temperature: 0.2,
+  });
+  return parseGiftCall(result);
 }
