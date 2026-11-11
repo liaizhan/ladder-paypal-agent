@@ -28,7 +28,7 @@ export interface OrderRecord {
   status: string; // CREATED, APPROVED, COMPLETED, REFUNDED, INSTRUMENT_DECLINED, VOIDED, EXPIRED
   captureId: string;
   updatedAt: string;
-  createdBy?: 'agent' | 'person'; // the AI agent's tool call, or the PayPal button
+  createdBy?: 'agent' | 'person' | 'mcp'; // the AI agent's tool call, the PayPal button, or an outside agent over MCP
   refundId?: string;
   webhooks?: number; // verified PayPal webhook events applied to this order
   lastEvent?: string; // last verified PayPal event type
@@ -62,7 +62,7 @@ export function newOrderRecord(input: {
   recommended: unknown;
   steps: number;
   lang: unknown;
-  createdBy?: 'agent' | 'person';
+  createdBy?: 'agent' | 'person' | 'mcp';
   now?: Date;
 }): OrderRecord {
   const now = (input.now ?? new Date()).toISOString();

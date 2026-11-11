@@ -40,7 +40,13 @@ export function itemDescription(plan: Plan, ladder: Ladder | null): string {
   return text.slice(0, 127); // PayPal item description limit
 }
 
-export function buildOrder(plan: Plan, ladder: Ladder | null) {
+export interface ReturnTo {
+  returnUrl: string;
+  cancelUrl: string;
+}
+
+/** returnTo is set for orders approved outside the page (the MCP link): PayPal sends the person back there. */
+export function buildOrder(plan: Plan, ladder: Ladder | null, returnTo?: ReturnTo) {
   return {
     intent: 'CAPTURE',
     purchase_units: [
@@ -70,6 +76,7 @@ export function buildOrder(plan: Plan, ladder: Ladder | null) {
           brand_name: 'Ladder by Aizhan Li',
           shipping_preference: 'NO_SHIPPING',
           user_action: 'PAY_NOW',
+          ...(returnTo ? { return_url: returnTo.returnUrl, cancel_url: returnTo.cancelUrl } : {}),
         },
       },
     },
@@ -77,6 +84,16 @@ export function buildOrder(plan: Plan, ladder: Ladder | null) {
 }
 
 export async function createOrder(env: PayPalEnv, plan: Plan, ladder: Ladder | null): Promise<string> {
+  return (await createOrderWithLink(env, plan, ladder)).id;
+}
+
+/** The approval link of a created order: payer-action when payment_source is sent, approve otherwise. */
+export function approvalLink(links: unknown): string {
+  const list = Array.isArray(links) ? (links as { rel?: string; href?: string }[]) : [];
+  return (list.find((l) => l.rel === 'payer-action') ?? list.find((l) => l.rel === 'approve'))?.href ?? '';
+}
+
+export async function createOrderWithLink(env: PayPalEnv, plan: Plan, ladder: Ladder | null, returnTo?: ReturnTo): Promise<{ id: string; approveUrl: string }> {
   const token = await accessToken(env);
   const res = await fetch(`${apiBase(env)}/v2/checkout/orders`, {
     method: 'POST',
@@ -85,11 +102,11 @@ export async function createOrder(env: PayPalEnv, plan: Plan, ladder: Ladder | n
       'Content-Type': 'application/json',
       'PayPal-Request-Id': crypto.randomUUID(),
     },
-    body: JSON.stringify(buildOrder(plan, ladder)),
+    body: JSON.stringify(buildOrder(plan, ladder, returnTo)),
   });
-  const data = (await res.json()) as { id?: string; message?: string };
+  const data = (await res.json()) as { id?: string; message?: string; links?: unknown };
   if (!res.ok || !data.id) throw new Error(`paypal create ${res.status} ${data.message ?? ''}`);
-  return data.id;
+  return { id: data.id, approveUrl: approvalLink(data.links) };
 }
 
 export interface CaptureResult {

@@ -101,6 +101,7 @@ Design rules:
 - **The gift note is checked.** The note the AI writes for employees is dropped and replaced with a standard one if it mentions prices, money, doctors, therapy or cures.
 - **Guardrails you can see.** Under every recommendation the page shows which checks ran on that turn: the crisis check, the plan id taken from a fixed list, the price set by the server and the approval in PayPal, or "Refusal respected" when the agent called `skip_order`. The chips are built from the real tool call, not from fixed text.
 - **Try to break it.** The "Try to make it $1" button sends a prompt injection to the checkout agent and shows the raw tool call the model wrote, then runs the same functions the order and capture routes use on a tampered browser request and a $1 capture. In the live test the model did try `plan_id="ladder_free"`, and the server accepted nothing. The test creates no PayPal order and no ledger record.
+- **Other AI agents can buy, people still approve.** The MCP server at `/mcp` lets any MCP client prepare a PayPal order, but it gets back only an approval link. The plan id comes from an enum, the price from the server catalog, the goal goes through the crisis check, and PayPal sends the person back to `/return`, where the server captures and checks the amount.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
 
 ## PayPal features used
@@ -112,11 +113,31 @@ Design rules:
 - Invoicing v2: an access token with the `https://uri.paypal.com/services/invoicing` scope, `POST /v2/invoicing/invoices` (draft with one line, quantity = seats, partial payments off), `POST /v2/invoicing/invoices/:id/send` without PayPal email (HR gets the payer link) and `GET /v2/invoicing/invoices/:id` to confirm payment.
 - Webhooks: `CHECKOUT.ORDER.APPROVED`, `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED`, `PAYMENT.CAPTURE.REFUNDED`, `PAYMENT.CAPTURE.REVERSED`, `INVOICING.INVOICE.PAID`, `INVOICING.INVOICE.CANCELLED`, each verified with `POST /v1/notifications/verify-webhook-signature`.
 
+## MCP server: let any AI agent prepare a PayPal order
+
+`POST /mcp` is a stateless MCP server (Streamable HTTP, JSON answers, protocol versions 2025-11-25, 2025-06-18 and 2025-03-26). Add it to any MCP client as a remote server:
+
+```json
+{
+  "mcpServers": {
+    "ladder": { "type": "http", "url": "https://ladder-paypal-agent.liaizhan77.workers.dev/mcp" }
+  }
+}
+```
+
+Tools:
+
+- `list_ladder_plans`: plans and USD prices from the server catalog.
+- `buy_ladder_plan` (`plan_id`: `ladder_1m` or `ladder_3m`, optional `goal`): creates a PayPal Orders v2 order with `return_url` and `cancel_url` and returns the PayPal approval link. There is no price field; an `amount` sent by the agent is ignored. A goal that trips the crisis check returns help lines and no order.
+- `check_ladder_order` (`order_id`): the PayPal status of that order.
+
+The agent never pays. The person opens the link, approves in PayPal and lands on `/return`, where the server captures the order, checks the plan and amount against the catalog, signs the access pass and shows a one-click refund. These orders show on the dashboard as "Agent over MCP".
+
 ## Payments dashboard (AG Grid)
 
 `/dashboard` shows what the advisor and PayPal did, built with AG Grid Community:
 
-- **Orders grid:** created time, PayPal status, who created the order (the AI agent or the PayPal button), the plan the AI recommended, the plan the person chose, whether they followed the advice, amount, number of steps on the ladder, language, PayPal webhooks received and the last event, PayPal order id, capture id and refund id. Floating filters, quick search, status buttons (paid, open, refunded, declined or expired), pagination, a pinned total row and CSV export.
+- **Orders grid:** created time, PayPal status, who created the order (the AI agent, the PayPal button or an outside agent over MCP), the plan the AI recommended, the plan the person chose, whether they followed the advice, amount, number of steps on the ladder, language, PayPal webhooks received and the last event, PayPal order id, capture id and refund id. Floating filters, quick search, status buttons (paid, open, refunded, declined or expired), pagination, a pinned total row and CSV export.
 - **KPI tiles** that recompute from the filtered rows: conversations, recommendations and the share of 3-month advice, safety handoffs, orders and how many of them the AI agent created, paid share, net revenue after refunds, how often people paid for the plan the AI recommended, refunds under the 14-day guarantee and verified webhook events.
 - **Team gifts:** every gift invoice with its PayPal status, plan, seats, price per seat, total, access codes issued and the invoicing webhooks received, plus tiles for invoices, paid share, seats paid and gift revenue. Unpaid invoices are checked with PayPal Invoicing on each load.
 - **Advisor funnel by day:** conversations, recommendations (1 month and 3 months) and safety handoffs for the last 30 days.
@@ -182,7 +203,7 @@ npx wrangler secret put PASS_SECRET
 npm run deploy
 ```
 
-Tests (catalog, guardrails and the $1 attack, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
+Tests (catalog, guardrails and the $1 attack, the MCP server and return page, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
 
 ```bash
 npm test
@@ -196,6 +217,8 @@ npm test
 - `src/catalog.ts`: the only place with prices.
 - `src/safety.ts`: crisis check and help lines.
 - `src/guards.ts`: the guardrail chips, the $1 attack checks and the capture amount check.
+- `src/mcp.ts`: the MCP server and its three tools.
+- `src/returnPage.ts`: the page PayPal sends the person back to after approving an MCP order.
 - `src/pass.ts`: signed access pass and recommendation token.
 - `src/page.ts`: the page and PayPal Buttons.
 - `src/ledger.ts`: order ledger and chat counters in Workers KV.
@@ -204,7 +227,7 @@ npm test
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 

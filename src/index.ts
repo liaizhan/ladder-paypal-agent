@@ -4,6 +4,7 @@ import {
   captureOrder,
   createGiftInvoice,
   createOrder,
+  createOrderWithLink,
   eventToUpdate,
   getCapture,
   getInvoice,
@@ -47,6 +48,8 @@ import { HELP_TEXT, isCrisis } from './safety.ts';
 import { captureGuard, captureMatches, chatGuards, injectionGuard, INJECTION, tamperGuard, type Guard } from './guards.ts';
 import { renderPage } from './page.ts';
 import { renderGift } from './gift.ts';
+import { handleRpc, type McpDeps } from './mcp.ts';
+import { renderReturn } from './returnPage.ts';
 
 export interface Env {
   AI: AiBinding;
@@ -128,6 +131,62 @@ export default {
       return new Response(renderGift({ env: env.PAYPAL_ENV, plans: Object.values(PLANS), maxSeats: MAX_SEATS }), {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
       });
+    }
+
+    if (pathname === '/mcp') {
+      // Streamable HTTP, stateless: POST only, one JSON answer, no session, no SSE stream.
+      if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: { Allow: 'POST' } });
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }, 400);
+      }
+      const origin = url.origin;
+      const deps: McpDeps = {
+        buy: async (plan, goal) => {
+          const ladder = goal ? { goal, obstacles: [], me: '' } : null;
+          const order = await createOrderWithLink(env, plan, ladder, { returnUrl: `${origin}/return`, cancelUrl: `${origin}/` });
+          if (env.LADDER_ORDERS) {
+            background(ctx, saveOrder(env.LADDER_ORDERS, newOrderRecord({ orderId: order.id, chosen: plan.id, recommended: null, steps: 0, lang: '', createdBy: 'mcp' })));
+          }
+          return order;
+        },
+        status: async (orderId) => (await getOrderStatuses(env, [orderId]))[orderId] ?? '',
+      };
+      const batch = Array.isArray(body);
+      const answers = (await Promise.all((batch ? (body as unknown[]) : [body]).map((m) => handleRpc(m as any, deps)))).filter(Boolean);
+      if (!answers.length) return new Response(null, { status: 202 });
+      return json(batch ? answers : answers[0]);
+    }
+
+    // PayPal sends the person here after they approve an order made over MCP.
+    if (request.method === 'GET' && pathname === '/return') {
+      const orderId = url.searchParams.get('token') ?? '';
+      const html = (view: Parameters<typeof renderReturn>[0]) =>
+        new Response(renderReturn(view), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+      if (!/^[A-Z0-9]{8,32}$/.test(orderId)) return html({ kind: 'error', message: 'This link has no PayPal order.' });
+      try {
+        const result = await captureOrder(env, orderId);
+        const plan = captureMatches(result.status, result.planId, result.amount);
+        if (!plan) {
+          if (env.LADDER_ORDERS) background(ctx, updateOrder(env.LADDER_ORDERS, orderId, { status: result.status || 'FAILED' }));
+          return html({ kind: 'error', message: 'PayPal did not complete the payment. No access was given and you can try again.' });
+        }
+        if (env.LADDER_ORDERS) {
+          background(ctx, updateOrder(env.LADDER_ORDERS, orderId, { status: 'COMPLETED', captureId: result.captureId }));
+          background(ctx, linkCapture(env.LADDER_ORDERS, result.captureId, orderId));
+        }
+        const expires = expiryFrom(new Date(), plan.days);
+        const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: result.captureId, expires, orderId });
+        return html({ kind: 'paid', planName: plan.name, amount: result.amount, captureId: result.captureId, expires, pass });
+      } catch {
+        const status = (await getOrderStatuses(env, [orderId]).catch(() => ({}) as Record<string, string>))[orderId];
+        return html({
+          kind: 'error',
+          message: status === 'COMPLETED' ? 'This order is already paid. Your access is active.' : 'PayPal did not complete the payment. No money moved.',
+        });
+      }
     }
 
     if (request.method === 'GET' && pathname === '/dashboard') {

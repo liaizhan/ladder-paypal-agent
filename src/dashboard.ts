@@ -107,7 +107,7 @@ const money = (n) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFract
 const when = (iso) => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const statusClass = (s) => s === 'COMPLETED' ? 'ok' : PROBLEM.includes(s) ? 'bad' : REFUND.includes(s) || s === 'APPROVED' ? 'warn' : 'open';
 const statusText = (s) => ({ COMPLETED: 'Paid', CREATED: 'Checkout opened', APPROVED: 'Approved, not captured', PAYER_ACTION_REQUIRED: 'Waiting for the buyer', SAVED: 'Saved, not captured', INSTRUMENT_DECLINED: 'Card declined', VOIDED: 'Voided', EXPIRED: 'Expired', REFUNDED: 'Refunded', REVERSED: 'Reversed', DECLINED: 'Declined' }[s] || s);
-const BY = { agent: 'AI agent', person: 'PayPal button' };
+const BY = { agent: 'AI agent', person: 'PayPal button', mcp: 'Agent over MCP' };
 
 const ordersGrid = agGrid.createGrid($('orders'), {
   domLayout: 'autoHeight',
@@ -126,7 +126,7 @@ const ordersGrid = agGrid.createGrid($('orders'), {
       cellRenderer: (p) => p.node.rowPinned ? p.value : pill(statusText(p.value), statusClass(p.value)),
       filterValueGetter: (p) => statusText(p.data.status) },
     { field: 'createdBy', headerName: 'Order created by', minWidth: 150,
-      cellRenderer: (p) => p.node.rowPinned ? (p.value || '') : pill(BY[p.value] || 'PayPal button', p.value === 'agent' ? 'plan3' : 'plan1'),
+      cellRenderer: (p) => p.node.rowPinned ? (p.value || '') : pill(BY[p.value] || 'PayPal button', p.value === 'agent' || p.value === 'mcp' ? 'plan3' : 'plan1'),
       filterValueGetter: (p) => BY[p.data.createdBy] || 'PayPal button' },
     { field: 'recommended', headerName: 'AI recommended', minWidth: 140,
       cellRenderer: (p) => p.node.rowPinned ? '' : p.value ? pill(PLAN[p.value], p.value === 'ladder_3m' ? 'plan3' : 'plan1') : 'n/a',
