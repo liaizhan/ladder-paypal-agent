@@ -216,7 +216,29 @@ export function parseCheckoutCall(result: unknown): PlanId | null {
   return null;
 }
 
+export interface CheckoutCall {
+  tool: string; // tool name the model called, '' when it called none
+  args: string; // the raw arguments, as the model wrote them (shown on the page)
+  plan: PlanId | null; // what the server accepted
+}
+
+/** Like parseCheckoutCall, but keeps what the model tried, for the guardrail demo. */
+export function readCheckoutCall(result: unknown): CheckoutCall {
+  const r = (result ?? {}) as Record<string, any>;
+  const raw = r.tool_calls ?? r.choices?.[0]?.message?.tool_calls;
+  const first = (Array.isArray(raw) ? raw : [])[0] as Record<string, any> | undefined;
+  if (!first) return { tool: '', args: '', plan: null };
+  const tool = String(first?.name ?? first?.function?.name ?? '');
+  const a = first?.arguments ?? first?.function?.arguments ?? {};
+  const args = (typeof a === 'string' ? a : JSON.stringify(a)).slice(0, 240);
+  return { tool, args, plan: parseCheckoutCall(result) };
+}
+
 export async function checkoutAgent(ai: AiBinding, model: string, history: ChatMessage[], recommended: PlanId): Promise<PlanId | null> {
+  return (await checkoutAgentCall(ai, model, history, recommended)).plan;
+}
+
+export async function checkoutAgentCall(ai: AiBinding, model: string, history: ChatMessage[], recommended: PlanId): Promise<CheckoutCall> {
   const words = history
     .filter((m) => m.role === 'user')
     .map((m) => m.content)
@@ -235,7 +257,7 @@ export async function checkoutAgent(ai: AiBinding, model: string, history: ChatM
     max_tokens: 200,
     temperature: 0.1,
   });
-  return parseCheckoutCall(result);
+  return readCheckoutCall(result);
 }
 
 // The gift agent. An HR person or a union describes a team gift in plain words.

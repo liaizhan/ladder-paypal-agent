@@ -1,4 +1,4 @@
-import { advise, checkoutAgent, firstStep, giftAgent, sanitize, type AiBinding, type Ladder } from './agent.ts';
+import { advise, checkoutAgentCall, firstStep, giftAgent, sanitize, type AiBinding, type Ladder } from './agent.ts';
 import { giftTotal, MAX_SEATS, MIN_SEATS, PLANS, planOrNull } from './catalog.ts';
 import {
   captureOrder,
@@ -44,6 +44,7 @@ import {
 } from './ledger.ts';
 import { renderDashboard } from './dashboard.ts';
 import { HELP_TEXT, isCrisis } from './safety.ts';
+import { captureGuard, captureMatches, chatGuards, injectionGuard, INJECTION, tamperGuard, type Guard } from './guards.ts';
 import { renderPage } from './page.ts';
 import { renderGift } from './gift.ts';
 
@@ -147,6 +148,7 @@ export default {
         const turn = await advise(env.AI, env.AI_MODEL, history);
         let recToken: string | null = null;
         let agentOrder: { id: string; plan: string; tool: string } | null = null;
+        let guards: Guard[] = [];
         if (turn.stage === 'recommend' && turn.plan) {
           events.push({ kind: 'recommend', plan: turn.plan });
           const lang = detectLang(history.filter((m) => m.role === 'user').map((m) => m.content).join(' '));
@@ -155,7 +157,9 @@ export default {
           // The checkout agent may call create_paypal_order. The price comes from the catalog,
           // and the person still approves the payment in PayPal.
           try {
-            const agentPlan = planOrNull(await checkoutAgent(env.AI, env.AI_MODEL, history, turn.plan));
+            const call = await checkoutAgentCall(env.AI, env.AI_MODEL, history, turn.plan);
+            guards = chatGuards(call);
+            const agentPlan = planOrNull(call.plan);
             if (agentPlan) {
               const id = await createOrder(env, agentPlan, turn.ladder);
               agentOrder = { id, plan: agentPlan.id, tool: `create_paypal_order(plan_id="${agentPlan.id}")` };
@@ -169,9 +173,31 @@ export default {
           } catch (err) {
             console.log(JSON.stringify({ event: 'agent_order_error', message: String(err) }));
           }
+          if (!guards.length) guards = chatGuards(null);
         }
         if (env.LADDER_ORDERS) background(ctx, countChat(env.LADDER_ORDERS, events));
-        return json({ ...turn, recToken, agentOrder });
+        return json({ ...turn, recToken, agentOrder, guards });
+      }
+
+      // "Try to make it $1": runs the real checks with no PayPal call and no ledger record.
+      if (request.method === 'POST' && pathname === '/api/guard-test') {
+        let injection: Guard;
+        try {
+          const call = await checkoutAgentCall(env.AI, env.AI_MODEL, [{ role: 'user', content: INJECTION }], 'ladder_1m');
+          injection = injectionGuard(call);
+        } catch {
+          injection = { id: 'injection', ok: true, text: 'Model did not answer; the server created no order' };
+        }
+        return json({
+          prompt: INJECTION,
+          checks: [
+            injection,
+            tamperGuard({ plan: 'ladder_1m', amount: '1.00' }),
+            tamperGuard({ plan: 'ladder_free', amount: '1.00' }),
+            captureGuard(),
+          ],
+          note: 'No PayPal order was created by this test.',
+        });
       }
 
       if (request.method === 'POST' && pathname === '/api/orders') {
@@ -202,8 +228,8 @@ export default {
           if (kv) background(ctx, updateOrder(kv, capture[1], { status: 'INSTRUMENT_DECLINED' }));
           return json({ error: 'INSTRUMENT_DECLINED' }, 422);
         }
-        const plan = planOrNull(result.planId);
-        if (result.status !== 'COMPLETED' || !plan || result.amount !== plan.amount) {
+        const plan = captureMatches(result.status, result.planId, result.amount);
+        if (!plan) {
           if (kv) background(ctx, updateOrder(kv, capture[1], { status: result.status || 'FAILED' }));
           return json({ error: 'payment not completed', status: result.status }, 402);
         }

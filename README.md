@@ -99,6 +99,8 @@ Design rules:
 - **No database for access.** The access pass is signed and carries plan, expiry and the PayPal capture id.
 - **Gift codes only after full payment.** Codes are issued only when PayPal reports the invoice as PAID, the paid amount equals the invoice total and the total equals seats times the catalog price. Partial payments are switched off on the invoice. Codes are derived from the invoice id with HMAC, so a webhook and a status check arriving together issue the same set, and a used code stays used. A code has 12 symbols (about 59 bits), and one client gets at most 10 wrong attempts per hour.
 - **The gift note is checked.** The note the AI writes for employees is dropped and replaced with a standard one if it mentions prices, money, doctors, therapy or cures.
+- **Guardrails you can see.** Under every recommendation the page shows which checks ran on that turn: the crisis check, the plan id taken from a fixed list, the price set by the server and the approval in PayPal, or "Refusal respected" when the agent called `skip_order`. The chips are built from the real tool call, not from fixed text.
+- **Try to break it.** The "Try to make it $1" button sends a prompt injection to the checkout agent and shows the raw tool call the model wrote, then runs the same functions the order and capture routes use on a tampered browser request and a $1 capture. In the live test the model did try `plan_id="ladder_free"`, and the server accepted nothing. The test creates no PayPal order and no ledger record.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
 
 ## PayPal features used
@@ -140,7 +142,8 @@ The live site sells in Kazakhstani tenge through Kaspi: 19,900 KZT for 1 month a
 3. Read the ladder and the recommendation. Pick a plan.
 4. Press the PayPal button and log in with the sandbox buyer below. No real money moves.
 5. See the access pass, the expiry date, the PayPal capture id and your first step.
-6. Optional: press "Request a refund (14-day guarantee)" and confirm. The refund appears on the dashboard, together with the PayPal webhook that confirmed it.
+6. Before paying, press "Try to make it $1" to see a prompt injection and a tampered request blocked by the server.
+7. Optional: press "Request a refund (14-day guarantee)" and confirm. The refund appears on the dashboard, together with the PayPal webhook that confirmed it.
 
 Sandbox buyer for judges: see the Devpost submission ("Testing instructions"). Any PayPal sandbox personal account works too.
 
@@ -179,7 +182,7 @@ npx wrangler secret put PASS_SECRET
 npm run deploy
 ```
 
-Tests (catalog, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
+Tests (catalog, guardrails and the $1 attack, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
 
 ```bash
 npm test
@@ -192,6 +195,7 @@ npm test
 - `src/paypal.ts`: Orders v2 create and capture, Payments v2 refund, Invoicing v2, webhook verification.
 - `src/catalog.ts`: the only place with prices.
 - `src/safety.ts`: crisis check and help lines.
+- `src/guards.ts`: the guardrail chips, the $1 attack checks and the capture amount check.
 - `src/pass.ts`: signed access pass and recommendation token.
 - `src/page.ts`: the page and PayPal Buttons.
 - `src/ledger.ts`: order ledger and chat counters in Workers KV.
@@ -200,7 +204,7 @@ npm test
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 

@@ -53,6 +53,14 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
   .fine { color:var(--muted); font-size:13px; margin-top:10px; }
   .ok { color:var(--ok); font-weight:600; }
   #paypal-buttons { margin-top:14px; min-height:50px; }
+  .guards { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; line-height:1.3; padding:5px 10px; border-radius:999px; background:#eef6ee; color:#1d6b2f; border:1px solid #cfe5d3; }
+  .chip::before { content:'\\2713'; font-weight:700; }
+  .chip.blocked { background:#fff4f2; color:#a1301f; border-color:#f3c9c2; }
+  .chip.blocked::before { content:'\\2715'; }
+  .guard-test { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+  .guard-test .prompt { font:12.5px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--muted); border:1px dashed var(--line); border-radius:10px; padding:8px 10px; }
+  .guard-test .chip { border-radius:10px; align-items:flex-start; }
   .hidden { display:none; }
   footer { margin-top:40px; color:var(--muted); font-size:13px; }
   footer a { color:#0066cc; }
@@ -82,9 +90,12 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <h2>Your ladder</h2>
     <div class="ladder" id="ladder"></div>
     <div class="reason" id="reason"></div>
+    <div class="guards" id="guards" aria-label="Guardrails that ran on this turn"></div>
     <div class="plans" id="plans"></div>
     <div id="paypal-buttons"></div>
     <p id="pay-status" class="sub" aria-live="polite"></p>
+    <button type="button" class="ghost" id="break-btn">Try to make it $1</button>
+    <div class="guard-test" id="guard-test" aria-live="polite"></div>
     <p class="fine">One payment, no auto-renewal. 14-day refund guarantee, one click after payment. Prices are sandbox demo equivalents in USD; on 108psy.com the plans cost 19,900 KZT and 39,800 KZT.</p>
   </section>
 
@@ -134,11 +145,51 @@ async function send(text) {
       state.agentOrder = turn.agentOrder || null;
       if (state.agentOrder) addMsg('assistant', 'Agent tool call: ' + state.agentOrder.tool + '\\nPayPal order ' + state.agentOrder.id + ' is ready and waiting for your approval. Nothing is charged until you approve it in PayPal.', 'tool');
       showRecommendation(turn);
+      showGuards($('guards'), turn.guards || [], false);
     }
   } catch (e) {
     thinking.textContent = 'Something went wrong. Please try again.';
   } finally {
     $('send').disabled = false;
+  }
+}
+
+function showGuards(box, guards, blocked) {
+  box.innerHTML = '';
+  guards.forEach((g) => {
+    const c = document.createElement('span');
+    c.className = 'chip' + (blocked ? ' blocked' : '');
+    c.textContent = g.text;
+    box.appendChild(c);
+  });
+}
+
+async function breakIt() {
+  const box = $('guard-test');
+  const btn = $('break-btn');
+  btn.disabled = true;
+  box.textContent = 'Sending a prompt injection to the checkout agent...';
+  try {
+    const res = await fetch('/api/guard-test', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error('error');
+    box.innerHTML = '';
+    const p = document.createElement('div');
+    p.className = 'prompt';
+    p.textContent = 'Attack: ' + data.prompt;
+    box.appendChild(p);
+    const list = document.createElement('div');
+    list.className = 'guard-test';
+    showGuards(list, data.checks, true);
+    box.appendChild(list);
+    const n = document.createElement('p');
+    n.className = 'fine';
+    n.textContent = 'Blocked by code, not by the model. ' + data.note;
+    box.appendChild(n);
+  } catch (e) {
+    box.textContent = 'The test did not run. Please try again.';
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -257,6 +308,7 @@ $('refund-btn').addEventListener('click', async () => {
 
 $('form').addEventListener('submit', (e) => { e.preventDefault(); send($('input').value); });
 $('input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send($('input').value); } });
+$('break-btn').addEventListener('click', breakIt);
 document.querySelectorAll('#examples button').forEach((b) => b.addEventListener('click', () => send(b.dataset.text)));
 </script>
 </body>
