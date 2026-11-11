@@ -99,7 +99,7 @@ function pill(text, cls) {
 const money = (n) => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const when = (iso) => iso ? new Date(iso).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
 const statusClass = (s) => s === 'COMPLETED' ? 'ok' : PROBLEM.includes(s) ? 'bad' : s === 'APPROVED' ? 'warn' : 'open';
-const statusText = (s) => ({ COMPLETED: 'Paid', CREATED: 'Checkout opened', APPROVED: 'Approved, not captured', INSTRUMENT_DECLINED: 'Card declined', VOIDED: 'Voided', EXPIRED: 'Expired' }[s] || s);
+const statusText = (s) => ({ COMPLETED: 'Paid', CREATED: 'Checkout opened', APPROVED: 'Approved, not captured', PAYER_ACTION_REQUIRED: 'Waiting for the buyer', SAVED: 'Saved, not captured', INSTRUMENT_DECLINED: 'Card declined', VOIDED: 'Voided', EXPIRED: 'Expired' }[s] || s);
 
 const ordersGrid = agGrid.createGrid($('orders'), {
   domLayout: 'autoHeight',
@@ -176,6 +176,8 @@ function updateFromGrid() {
   const paid = rows.filter((r) => r.status === 'COMPLETED');
   const advised = rows.filter((r) => r.followedAdvice !== null);
   const followed = advised.filter((r) => r.followedAdvice).length;
+  const paidAdvised = paid.filter((r) => r.followedAdvice !== null);
+  const paidFollowed = paidAdvised.filter((r) => r.followedAdvice).length;
   const revenue = paid.reduce((s, r) => s + Number(r.amount), 0);
   ordersGrid.setGridOption('pinnedBottomRowData', [{
     createdAt: '', status: rows.length + ' orders', followedAdvice: advised.length ? Math.round(100 * followed / advised.length) + '% followed' : '',
@@ -192,7 +194,7 @@ function updateFromGrid() {
     [rows.length, 'PayPal orders' + (statusFilter !== 'all' || ordersGrid.isAnyFilterPresent() ? ' (filtered)' : '')],
     [paid.length, 'Paid' + (rows.length ? ', ' + Math.round(100 * paid.length / rows.length) + '% of orders' : '')],
     [money(revenue), 'Captured revenue (sandbox)'],
-    [advised.length ? Math.round(100 * followed / advised.length) + '%' : 'n/a', 'Paid for the plan the AI recommended'],
+    [paidAdvised.length ? Math.round(100 * paidFollowed / paidAdvised.length) + '%' : 'n/a', 'Paid orders on the plan the AI recommended'],
     [recs ? Math.round(100 * allOrders.length / recs) + '%' : 'n/a', 'Recommendations that opened PayPal'],
   ];
   const box = $('kpis');
