@@ -1,7 +1,21 @@
 import { advise, firstStep, sanitize, type AiBinding, type Ladder } from './agent.ts';
 import { PLANS, planOrNull } from './catalog.ts';
-import { captureOrder, createOrder } from './paypal.ts';
-import { expiryFrom, signPass, verifyPass } from './pass.ts';
+import { captureOrder, createOrder, getOrderStatuses } from './paypal.ts';
+import { expiryFrom, signPass, signRecommendation, verifyPass, verifyRecommendation } from './pass.ts';
+import {
+  countChat,
+  detectLang,
+  isFinal,
+  listDays,
+  listOrders,
+  newOrderRecord,
+  publicOrder,
+  saveOrder,
+  updateOrder,
+  type ChatEvent,
+  type KVNamespace,
+} from './ledger.ts';
+import { renderDashboard } from './dashboard.ts';
 import { HELP_TEXT, isCrisis } from './safety.ts';
 import { renderPage } from './page.ts';
 
@@ -12,6 +26,16 @@ export interface Env {
   PAYPAL_CLIENT_ID: string;
   PAYPAL_CLIENT_SECRET: string;
   PASS_SECRET: string;
+  LADDER_ORDERS?: KVNamespace;
+}
+
+interface Ctx {
+  waitUntil(p: Promise<unknown>): void;
+}
+
+// Ledger writes never break a chat or a payment.
+function background(ctx: Ctx, work: Promise<unknown>): void {
+  ctx.waitUntil(work.catch((err) => console.log(JSON.stringify({ event: 'ledger_error', message: String(err) }))));
 }
 
 const json = (data: unknown, status = 200) =>
@@ -39,7 +63,7 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     const url = new URL(request.url);
     const { pathname } = url;
 
@@ -49,24 +73,48 @@ export default {
       });
     }
 
+    if (request.method === 'GET' && pathname === '/dashboard') {
+      return new Response(renderDashboard(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
     try {
       if (request.method === 'POST' && pathname === '/api/chat') {
         const body = await readJson(request);
         const history = sanitize(body.messages);
         const last = [...history].reverse().find((m) => m.role === 'user');
         if (!last) return json({ error: 'empty' }, 400);
+        const events: ChatEvent[] = history.filter((m) => m.role === 'user').length === 1 ? [{ kind: 'start' }] : [];
         if (history.some((m) => m.role === 'user' && isCrisis(m.content))) {
+          if (env.LADDER_ORDERS) background(ctx, countChat(env.LADDER_ORDERS, [...events, { kind: 'safety' }]));
           return json({ reply: HELP_TEXT, stage: 'help', ladder: null, plan: null, reason: null });
         }
         const turn = await advise(env.AI, env.AI_MODEL, history);
-        return json(turn);
+        let recToken: string | null = null;
+        if (turn.stage === 'recommend' && turn.plan) {
+          events.push({ kind: 'recommend', plan: turn.plan });
+          const lang = detectLang(history.filter((m) => m.role === 'user').map((m) => m.content).join(' '));
+          recToken = await signRecommendation(env.PASS_SECRET, { plan: turn.plan, steps: turn.ladder?.obstacles.length ?? 0, lang });
+        }
+        if (env.LADDER_ORDERS) background(ctx, countChat(env.LADDER_ORDERS, events));
+        return json({ ...turn, recToken });
       }
 
       if (request.method === 'POST' && pathname === '/api/orders') {
         const body = await readJson(request);
         const plan = planOrNull(body.plan);
         if (!plan) return json({ error: 'unknown plan' }, 400);
-        const id = await createOrder(env, plan, cleanLadder(body.ladder));
+        const ladder = cleanLadder(body.ladder);
+        const id = await createOrder(env, plan, ladder);
+        if (env.LADDER_ORDERS) {
+          const rec = await verifyRecommendation(env.PASS_SECRET, body.recToken);
+          background(
+            ctx,
+            saveOrder(
+              env.LADDER_ORDERS,
+              newOrderRecord({ orderId: id, chosen: plan.id, recommended: rec?.plan, steps: rec?.steps ?? ladder?.obstacles.length ?? 0, lang: rec?.lang }),
+            ),
+          );
+        }
         return json({ id });
       }
 
@@ -74,11 +122,17 @@ export default {
       if (request.method === 'POST' && capture) {
         const body = await readJson(request);
         const result = await captureOrder(env, capture[1]);
-        if (result.status === 'INSTRUMENT_DECLINED') return json({ error: 'INSTRUMENT_DECLINED' }, 422);
+        const kv = env.LADDER_ORDERS;
+        if (result.status === 'INSTRUMENT_DECLINED') {
+          if (kv) background(ctx, updateOrder(kv, capture[1], { status: 'INSTRUMENT_DECLINED' }));
+          return json({ error: 'INSTRUMENT_DECLINED' }, 422);
+        }
         const plan = planOrNull(result.planId);
         if (result.status !== 'COMPLETED' || !plan || result.amount !== plan.amount) {
+          if (kv) background(ctx, updateOrder(kv, capture[1], { status: result.status || 'FAILED' }));
           return json({ error: 'payment not completed', status: result.status }, 402);
         }
+        if (kv) background(ctx, updateOrder(kv, capture[1], { status: 'COMPLETED', captureId: result.captureId }));
         const expires = expiryFrom(new Date(), plan.days);
         const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: result.captureId, expires });
         const ladder = cleanLadder(body.ladder);
@@ -101,6 +155,29 @@ export default {
           pass,
           firstStep: step,
         });
+      }
+
+      if (request.method === 'GET' && pathname === '/api/dashboard') {
+        const kv = env.LADDER_ORDERS;
+        if (!kv) return json({ orders: [], days: [], reconciled: 0 });
+        const [orders, days] = await Promise.all([listOrders(kv), listDays(kv)]);
+        // Reconcile unfinished orders older than 2 minutes with PayPal Orders v2 (at most 10 per load).
+        const stale = orders
+          .filter((o) => !isFinal(o.status) && Date.now() - Date.parse(o.updatedAt) > 120_000)
+          .slice(0, 10);
+        let reconciled = 0;
+        if (stale.length) {
+          const statuses = await getOrderStatuses(env, stale.map((o) => o.orderId)).catch(() => ({}) as Record<string, string>);
+          for (const o of stale) {
+            const st = statuses[o.orderId];
+            if (!st) continue;
+            reconciled++;
+            o.status = st;
+            o.updatedAt = new Date().toISOString();
+            background(ctx, saveOrder(kv, o));
+          }
+        }
+        return json({ orders: orders.map(publicOrder), days, reconciled, generatedAt: new Date().toISOString() });
       }
 
       if (request.method === 'GET' && pathname === '/api/pass') {

@@ -119,3 +119,20 @@ export async function captureOrder(env: PayPalEnv, orderId: string): Promise<Cap
     payerName: data.payer?.name?.given_name ?? '',
   };
 }
+
+/** Orders v2 GET: the dashboard reconciles unfinished orders with PayPal (one token for all). */
+export async function getOrderStatuses(env: PayPalEnv, orderIds: string[]): Promise<Record<string, string>> {
+  const ids = orderIds.filter((id) => /^[A-Z0-9]{8,32}$/.test(id));
+  if (!ids.length) return {};
+  const token = await accessToken(env);
+  const pairs = await Promise.all(
+    ids.map(async (id) => {
+      const res = await fetch(`${apiBase(env)}/v2/checkout/orders/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 404) return [id, 'EXPIRED'] as const;
+      if (!res.ok) return [id, ''] as const;
+      const data = (await res.json()) as { status?: string };
+      return [id, data.status ?? ''] as const;
+    }),
+  );
+  return Object.fromEntries(pairs.filter(([, st]) => st));
+}

@@ -8,13 +8,20 @@ const CRISIS_PATTERNS: RegExp[] = [
   /end (my|it all|my life)/i,
   /self[- ]?harm/i,
   /want to die/i,
+  /(don'?t|do not|no longer) want to (live|be alive|exist)/i,
+  /(no reason|not worth it) to live/i,
+  /better off dead/i,
+  /(hurt|cut|harm) myself/i,
   /суицид/i,
   /покончить с собой/i,
-  /не хочу жить/i,
+  /не хочу (больше )?жить/i,
+  /жить не (хочу|хочется)/i,
+  /причин(ить|яю) себе (вред|боль)/i,
   /убить себя/i,
   /хочу умереть/i,
   /өзімді өлтір/i,
   /өмір сүргім келмейді/i,
+  /өлгім келеді/i,
 ];
 
 export const HELP_TEXT =

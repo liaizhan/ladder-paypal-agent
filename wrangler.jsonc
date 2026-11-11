@@ -3,6 +3,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "ai": { "binding": "AI" },
+  "kv_namespaces": [{ "binding": "LADDER_ORDERS", "id": "7d114bce0c2b4ef59f7d6d2349afe566" }],
   "vars": {
     "PAYPAL_ENV": "sandbox",
     "PAYPAL_CLIENT_ID": "BAANuxRRBT8PW9ZN-Z_Zpx1ouEMEO4n1hmWncKoZ98eDdddiL_GLZ1cQkGYHBWZASPKIBbp_gHC2CTb_2A",

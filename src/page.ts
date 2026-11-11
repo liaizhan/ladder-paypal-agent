@@ -93,11 +93,11 @@ export function renderPage({ clientId, plans, env }: PageProps): string {
     <p class="fine" id="pass-check"></p>
   </section>
 
-  <footer>Ladder method by Aizhan Li, author of the Ladder method. Live product: <a href="https://108psy.com">108psy.com</a>. The advisor is not a doctor or a therapist and does not diagnose.</footer>
+  <footer>Ladder method by Aizhan Li, author of the Ladder method. Live product: <a href="https://108psy.com">108psy.com</a>. The advisor is not a doctor or a therapist and does not diagnose. <a href="/dashboard">Payments dashboard</a></footer>
 </div>
 <script>
 const CONFIG = ${config};
-const state = { messages: [], ladder: null, plan: null, recommended: null, sdkLoaded: false };
+const state = { messages: [], ladder: null, plan: null, recommended: null, recToken: null, sdkLoaded: false };
 const $ = (id) => document.getElementById(id);
 
 function addMsg(role, text, cls) {
@@ -137,6 +137,7 @@ async function send(text) {
 function showRecommendation(turn) {
   state.ladder = turn.ladder;
   state.recommended = turn.plan;
+  state.recToken = turn.recToken || null;
   state.plan = turn.plan;
   const ladder = $('ladder');
   ladder.innerHTML = '';
@@ -190,7 +191,7 @@ function renderButtons() {
   paypal.Buttons({
     style: { layout: 'vertical', shape: 'rect', label: 'pay' },
     createOrder: async () => {
-      const res = await fetch('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: state.plan, ladder: state.ladder }) });
+      const res = await fetch('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plan: state.plan, ladder: state.ladder, recToken: state.recToken }) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'order failed');
       return data.id;
