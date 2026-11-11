@@ -42,6 +42,15 @@ export function renderDashboard(): string {
   .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }
   .note { color:var(--muted); font-size:13px; margin-top:8px; }
   .ag-row-pinned { font-weight:600; }
+  .ask { display:flex; gap:8px; flex-wrap:wrap; margin:14px 0 4px; }
+  .ask input { flex:1; min-width:220px; border:1px solid var(--line); border-radius:10px; padding:11px 14px; font:inherit; font-size:15px; }
+  .ask button { border:0; border-radius:10px; background:var(--blue); color:#fff; font:600 15px/1 inherit; padding:11px 16px; cursor:pointer; }
+  .ask button.ghost { background:#fff; color:var(--link); border:1px solid var(--line); }
+  .ask-ex { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 0; }
+  .ask-ex button { border:1px solid var(--line); background:var(--tile); color:var(--ink); border-radius:999px; padding:5px 11px; font:13px/1.2 inherit; cursor:pointer; }
+  .ask-out { margin:8px 0 0; font-size:13px; color:var(--muted); }
+  .ask-out .chip { display:inline-block; background:#e6f0fc; color:var(--blue); border-radius:999px; padding:2px 9px; margin:2px 4px 2px 0; font-weight:600; font-size:12px; }
+  .ask-out code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; color:var(--ink); word-break:break-all; }
   footer { margin-top:40px; color:var(--muted); font-size:13px; }
   @media (max-width:760px) { .kpis { grid-template-columns:repeat(2,1fr); } h1 { font-size:28px; } .bar .right { margin-left:0; } }
 </style>
@@ -57,6 +66,18 @@ export function renderDashboard(): string {
 
   <h2>Orders</h2>
   <p class="sub">Filter, sort and search. The cards above and the total row follow your filter.</p>
+  <form class="ask" id="ask-form">
+    <input id="ask-q" type="text" maxlength="200" placeholder="Ask in plain words, for example: paid orders from outside agents, biggest first" aria-label="Ask the grid a question">
+    <button type="submit" id="ask-btn">Ask the grid</button>
+    <button type="button" class="ghost" id="ask-clear">Clear</button>
+  </form>
+  <div class="ask-ex" id="ask-ex">
+    <button type="button">Paid orders, biggest first</button>
+    <button type="button">Who switched away from the AI's plan?</button>
+    <button type="button">Orders made by agents over MCP this week</button>
+    <button type="button">Refunds</button>
+  </div>
+  <p class="ask-out" id="ask-out" aria-live="polite">The AI reads only your question and returns a filter and a sort. It never sees the orders; the grid applies the view in your browser.</p>
   <div class="bar">
     <input id="search" type="search" placeholder="Search orders, capture ids, plans" aria-label="Search orders">
     <div id="status-filter">
@@ -146,6 +167,7 @@ const ordersGrid = agGrid.createGrid($('orders'), {
     { field: 'captureId', headerName: 'PayPal capture', cellClass: 'mono', minWidth: 170 },
     { field: 'webhooks', headerName: 'PayPal webhooks', minWidth: 190,
       valueGetter: (p) => p.node.rowPinned ? p.data.webhooks : (p.data.webhooks ? p.data.webhooks + ', last ' + (p.data.lastEvent || '') : ''),
+      comparator: (a, b, na, nb) => ((na && na.data && na.data.webhooks) || 0) - ((nb && nb.data && nb.data.webhooks) || 0),
       cellClass: 'mono' },
     { field: 'refundId', headerName: 'PayPal refund', cellClass: 'mono', minWidth: 160 },
   ],
@@ -315,6 +337,52 @@ document.querySelectorAll('#status-filter button').forEach((b) => b.addEventList
   document.querySelectorAll('#status-filter button').forEach((x) => x.classList.toggle('on', x === b));
   ordersGrid.onFilterChanged();
 }));
+function setStatus(f) {
+  statusFilter = f;
+  document.querySelectorAll('#status-filter button').forEach((x) => x.classList.toggle('on', x.dataset.f === f));
+}
+function clearView() {
+  setStatus('all');
+  ordersGrid.setFilterModel(null);
+  ordersGrid.applyColumnState({ state: [{ colId: 'createdAt', sort: 'desc' }], defaultState: { sort: null } });
+  ordersGrid.onFilterChanged();
+}
+async function ask(q) {
+  const out = $('ask-out');
+  q = (q || '').trim();
+  if (!q) return;
+  $('ask-q').value = q;
+  $('ask-btn').disabled = true;
+  out.textContent = 'Asking the AI for a view...';
+  try {
+    const res = await fetch('/api/ask-grid', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q }) });
+    const r = await res.json();
+    if (!res.ok) throw new Error(r.error || 'failed');
+    const v = r.view;
+    setStatus(v.status);
+    ordersGrid.setFilterModel(Object.keys(v.filterModel).length ? v.filterModel : null);
+    ordersGrid.applyColumnState({ state: [v.sort || { colId: 'createdAt', sort: 'desc' }], defaultState: { sort: null } });
+    ordersGrid.onFilterChanged();
+    const n = shown().length;
+    out.replaceChildren();
+    const lead = document.createElement('span');
+    lead.textContent = n + (n === 1 ? ' order. ' : ' orders. ');
+    out.append(lead);
+    (v.chips.length ? v.chips : ['All orders']).forEach((c) => { const s = document.createElement('span'); s.className = 'chip'; s.textContent = c; out.append(s); });
+    const raw = document.createElement('div');
+    raw.append('Tool call the model wrote: ');
+    const code = document.createElement('code'); code.textContent = 'set_grid_view ' + r.toolCall; raw.append(code);
+    raw.append('. Every value was checked against fixed lists on the server.');
+    out.append(raw);
+  } catch (e) {
+    out.textContent = 'The AI could not turn that into a view. Try the filters, or ask in other words.';
+  } finally {
+    $('ask-btn').disabled = false;
+  }
+}
+$('ask-form').addEventListener('submit', (e) => { e.preventDefault(); ask($('ask-q').value); });
+$('ask-clear').addEventListener('click', () => { $('ask-q').value = ''; clearView(); $('ask-out').textContent = 'View cleared.'; });
+document.querySelectorAll('#ask-ex button').forEach((b) => b.addEventListener('click', () => ask(b.textContent)));
 $('refresh').addEventListener('click', load);
 $('csv').addEventListener('click', () => ordersGrid.exportDataAsCsv({ fileName: 'ladder-paypal-orders.csv', skipPinnedBottom: true,
   processCellCallback: (p) => p.column.getColId() === 'createdAt' ? p.value : p.formatValue ? p.formatValue(p.value) : p.value }));

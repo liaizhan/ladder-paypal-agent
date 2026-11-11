@@ -50,6 +50,7 @@ import { renderPage } from './page.ts';
 import { renderGift } from './gift.ts';
 import { handleRpc, type McpDeps } from './mcp.ts';
 import { renderReturn } from './returnPage.ts';
+import { askGrid, cleanQuestion } from './ask.ts';
 
 export interface Env {
   AI: AiBinding;
@@ -239,6 +240,20 @@ export default {
       }
 
       // "Try to make it $1": runs the real checks with no PayPal call and no ledger record.
+      if (request.method === 'POST' && pathname === '/api/ask-grid') {
+        // The model returns only a filter and a sort for the grid; it never sees the orders.
+        const body = (await request.json().catch(() => ({}))) as { question?: unknown };
+        const question = cleanQuestion(body.question);
+        if (!question) return json({ error: 'empty question' }, 400);
+        try {
+          const { args, view } = await askGrid(env.AI, env.AI_MODEL, question);
+          if (!view) return json({ error: 'no view' }, 502);
+          return json({ question, toolCall: JSON.stringify(args).slice(0, 300), view });
+        } catch {
+          return json({ error: 'model unavailable' }, 503);
+        }
+      }
+
       if (request.method === 'POST' && pathname === '/api/guard-test') {
         let injection: Guard;
         try {

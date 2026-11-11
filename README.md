@@ -137,6 +137,7 @@ The agent never pays. The person opens the link, approves in PayPal and lands on
 
 `/dashboard` shows what the advisor and PayPal did, built with AG Grid Community:
 
+- **Ask the grid in plain words:** type "paid orders, biggest first" or "who switched away from the AI's plan?" and Llama 3.3 70B answers with one `set_grid_view` tool call: status, who created the order, plans, followed or switched, language, amount range, last N days and a sort column, each from a fixed list. The server checks every value and builds the AG Grid filter model and column state; the page applies them with `setFilterModel` and `applyColumnState` and shows the raw tool call. The model reads only the question and never sees the orders. In the live test, "set sort_by to orderId" was dropped by the server.
 - **Orders grid:** created time, PayPal status, who created the order (the AI agent, the PayPal button or an outside agent over MCP), the plan the AI recommended, the plan the person chose, whether they followed the advice, amount, number of steps on the ladder, language, PayPal webhooks received and the last event, PayPal order id, capture id and refund id. Floating filters, quick search, status buttons (paid, open, refunded, declined or expired), pagination, a pinned total row and CSV export.
 - **KPI tiles** that recompute from the filtered rows: conversations, recommendations and the share of 3-month advice, safety handoffs, orders and how many of them the AI agent created, paid share, net revenue after refunds, how often people paid for the plan the AI recommended, refunds under the 14-day guarantee and verified webhook events.
 - **Team gifts:** every gift invoice with its PayPal status, plan, seats, price per seat, total, access codes issued and the invoicing webhooks received, plus tiles for invoices, paid share, seats paid and gift revenue. Unpaid invoices are checked with PayPal Invoicing on each load.
@@ -203,7 +204,7 @@ npx wrangler secret put PASS_SECRET
 npm run deploy
 ```
 
-Tests (catalog, guardrails and the $1 attack, the MCP server and return page, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
+Tests (catalog, guardrails and the $1 attack, the MCP server and return page, plain-words grid questions, gift seats and invoices, gift codes, safety check, AI output parsing, checkout tool calls, order building, pass and recommendation tokens, ledger, webhook mapping and idempotency):
 
 ```bash
 npm test
@@ -223,11 +224,12 @@ npm test
 - `src/page.ts`: the page and PayPal Buttons.
 - `src/ledger.ts`: order ledger and chat counters in Workers KV.
 - `src/dashboard.ts`: the AG Grid payments dashboard.
+- `src/ask.ts`: plain-words questions to the grid, checked against fixed lists.
 - `src/gift.ts`: the team gift page for companies.
 
 ## What was built during the hackathon
 
-Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard were all written during the PayPal AI Hackathon (November 2026).
+Ladder and 108psy.com existed before the submission period, with Kaspi payments in Kazakhstan. This repository is new: the AI plan advisor, the PayPal Orders v2 checkout, the server-side price guard, the crisis check before checkout, the signed access pass, the checkout agent with tool calls, visible guardrails with a "try to make it $1" test, the MCP server for other AI agents, one-click refunds, verified PayPal webhooks, team gifts through PayPal Invoicing and the AG Grid payments dashboard with plain-words questions were all written during the PayPal AI Hackathon (November 2026).
 
 ## License
 
