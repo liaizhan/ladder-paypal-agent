@@ -97,7 +97,7 @@ Design rules:
 - **No health promises.** The advisor is told it is not a doctor or a therapist and never promises results.
 - **Personal order lines.** The PayPal item description carries the plan and the person's goal, so the receipt says what they are working on.
 - **No database for access.** The access pass is signed and carries plan, expiry and the PayPal capture id.
-- **Gift codes only after full payment.** Codes are issued only when PayPal reports the invoice as PAID, the paid amount equals the invoice total and the total equals seats times the catalog price. Partial payments are switched off on the invoice. Codes are derived from the invoice id with HMAC, so a webhook and a status check arriving together issue the same set, and a used code stays used.
+- **Gift codes only after full payment.** Codes are issued only when PayPal reports the invoice as PAID, the paid amount equals the invoice total and the total equals seats times the catalog price. Partial payments are switched off on the invoice. Codes are derived from the invoice id with HMAC, so a webhook and a status check arriving together issue the same set, and a used code stays used. A code has 12 symbols (about 59 bits), and one client gets at most 10 wrong attempts per hour.
 - **The gift note is checked.** The note the AI writes for employees is dropped and replaced with a standard one if it mentions prices, money, doctors, therapy or cures.
 - **Privacy by design in the ledger.** The dashboard ledger keeps plan ids, counts, PayPal ids and statuses only. No goals, obstacles, names or emails are stored.
 

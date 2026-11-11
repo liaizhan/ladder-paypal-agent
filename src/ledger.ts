@@ -291,14 +291,31 @@ export async function giftCodes(secret: string, invoiceId: string, seats: number
   const out: string[] = [];
   for (let i = 0; i < seats; i++) {
     const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`gift:${invoiceId}:${i}`)));
+    // 12 symbols from 31 is about 59 bits. Bytes 248..255 are skipped, so every symbol is equally likely.
     let s = '';
-    for (let j = 0; j < 8; j++) s += CODE_ALPHABET[mac[j] % CODE_ALPHABET.length];
-    out.push(`LDR-${s.slice(0, 4)}-${s.slice(4)}`);
+    for (let j = 0; j < mac.length && s.length < 12; j++) if (mac[j] < 248) s += CODE_ALPHABET[mac[j] % CODE_ALPHABET.length];
+    out.push(`LDR-${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`);
   }
   return out;
 }
 
-export const GIFT_CODE = /^LDR-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/;
+export const GIFT_CODE = /^LDR(-[A-HJKMNP-Z2-9]{4}){3}$/;
+
+const REDEEM_FAILS_PER_HOUR = 10;
+const failKey = (client: string) => `rl:redeem:${client}:${new Date().toISOString().slice(0, 13)}`;
+
+/** True when this client has used up its wrong code attempts for the hour. */
+export async function redeemBlocked(kv: KVNamespace, client: string): Promise<boolean> {
+  const { metadata } = await kv.getWithMetadata(failKey(client));
+  return Number((metadata as { n?: number } | null)?.n ?? 0) >= REDEEM_FAILS_PER_HOUR;
+}
+
+export async function noteRedeemFail(kv: KVNamespace, client: string): Promise<void> {
+  const k = failKey(client);
+  const { metadata } = await kv.getWithMetadata(k);
+  const n = Number((metadata as { n?: number } | null)?.n ?? 0) + 1;
+  await kv.put(k, '', { metadata: { n }, expirationTtl: 3600 });
+}
 
 interface CodeEntry {
   invoiceId: string;

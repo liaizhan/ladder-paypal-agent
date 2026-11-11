@@ -4,7 +4,7 @@ import { PLANS, cleanSeats, giftTotal } from '../src/catalog.ts';
 import { DEFAULT_GIFT_NOTE, cleanGiftNote, parseGiftCall } from '../src/agent.ts';
 import { INVOICE_ID, buildGiftInvoice, invoiceEventId, readInvoice } from '../src/paypal.ts';
 import { signGift, verifyGift } from '../src/pass.ts';
-import { GIFT_CODE, giftCodes, issueGiftCodes, publicGift, redeemGiftCode, saveGift, getGift, type GiftRecord, type KVNamespace } from '../src/ledger.ts';
+import { GIFT_CODE, giftCodes, noteRedeemFail, redeemBlocked, issueGiftCodes, publicGift, redeemGiftCode, saveGift, getGift, type GiftRecord, type KVNamespace } from '../src/ledger.ts';
 
 function memoryKv(): KVNamespace {
   const m = new Map<string, { value: string; metadata: unknown }>();
@@ -89,7 +89,8 @@ test('gift codes: one per seat, stable for the same invoice, each code works onc
   assert.equal(await redeemGiftCode(kv, codes[0]), null);
   await issueGiftCodes(kv, 'secret', rec); // a second webhook does not revive a used code
   assert.equal(await redeemGiftCode(kv, codes[0]), null);
-  assert.equal(await redeemGiftCode(kv, 'LDR-AAAA-AAAA'), null);
+  assert.equal(await redeemGiftCode(kv, 'LDR-AAAA-AAAA-AAAA'), null);
+  assert.equal(await redeemGiftCode(kv, codes[1].slice(0, 13)), null); // the old 8-symbol shape is not accepted
   assert.equal(await redeemGiftCode(kv, 'not a code'), null);
 });
 
@@ -103,4 +104,13 @@ test('gift: HR token is bound to one invoice, dashboard hides payer link and unp
   assert.equal(pub.payerUrl, undefined);
   assert.equal(pub.invoiceId, '...MJ68');
   assert.equal(publicGift({ ...rec, status: 'PAID' }).invoiceId, ID);
+});
+
+test('gift redeem: after 10 wrong codes in an hour the client is blocked', async () => {
+  const kv = memoryKv();
+  for (let i = 0; i < 9; i++) await noteRedeemFail(kv, 'abc');
+  assert.equal(await redeemBlocked(kv, 'abc'), false);
+  await noteRedeemFail(kv, 'abc');
+  assert.equal(await redeemBlocked(kv, 'abc'), true);
+  assert.equal(await redeemBlocked(kv, 'other'), false);
 });

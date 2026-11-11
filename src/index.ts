@@ -25,6 +25,8 @@ import {
   listGifts,
   publicGift,
   redeemGiftCode,
+  redeemBlocked,
+  noteRedeemFail,
   saveGift,
   updateGift,
   type GiftRecord,
@@ -313,9 +315,17 @@ export default {
       if (request.method === 'POST' && pathname === '/api/gift/redeem') {
         const kv = env.LADDER_ORDERS;
         if (!kv) return json({ error: 'gifts need storage' }, 503);
+        // At most 10 wrong codes per client per hour. The client is a hash of the IP, the IP is not stored.
+        const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+        const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${env.PASS_SECRET}:${ip}`)));
+        const client = [...digest.slice(0, 8)].map((b) => b.toString(16).padStart(2, '0')).join('');
+        if (await redeemBlocked(kv, client)) return json({ error: 'Too many wrong codes. Please try again in an hour.' }, 429);
         const body = await readJson(request);
         const seat = await redeemGiftCode(kv, String(body.code ?? ''));
-        if (!seat) return json({ error: 'This code is not valid or was already used.' }, 404);
+        if (!seat) {
+          await noteRedeemFail(kv, client);
+          return json({ error: 'This code is not valid or was already used.' }, 404);
+        }
         const plan = PLANS[seat.plan];
         const expires = expiryFrom(new Date(), plan.days);
         const pass = await signPass(env.PASS_SECRET, { plan: plan.id, captureId: '', expires, invoiceId: seat.invoiceId });

@@ -106,7 +106,7 @@ export function renderGift({ env, plans, maxSeats }: GiftProps): string {
   <section class="card">
     <h2>Have a code?</h2>
     <form id="redeem-form">
-      <input type="text" id="code" placeholder="LDR-XXXX-XXXX" autocomplete="off" required>
+      <input type="text" id="code" placeholder="LDR-XXXX-XXXX-XXXX" autocomplete="off" required>
       <button type="submit">Open access</button>
     </form>
     <p class="fine" id="redeem-status" aria-live="polite"></p>
